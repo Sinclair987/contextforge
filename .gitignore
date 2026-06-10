@@ -1,3 +1,6 @@
 /target/
 /tmp-*/
 /contextforge.toml
+/context-bundle.md
+/context-manifest.json
+/context-report.md

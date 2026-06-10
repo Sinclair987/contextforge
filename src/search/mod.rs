@@ -11,7 +11,10 @@ use crate::{
 pub struct SearchHit {
     pub path: PathBuf,
     pub start_line: usize,
+    pub end_line: usize,
     pub score: usize,
+    pub token_estimate: usize,
+    pub text: String,
     pub preview: String,
 }
 
@@ -37,11 +40,15 @@ pub fn search_directory(source: &Path, query: &str) -> Result<Vec<SearchHit>> {
                 continue;
             }
 
+            let preview = preview(&chunk.text);
             hits.push(SearchHit {
                 path: chunk.path,
                 start_line: chunk.start_line,
+                end_line: chunk.end_line,
                 score,
-                preview: preview(&chunk.text),
+                token_estimate: chunk.token_estimate,
+                text: chunk.text,
+                preview,
             });
         }
     }

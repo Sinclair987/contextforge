@@ -14,6 +14,19 @@ pub enum ContextForgeError {
         source: std::io::Error,
     },
 
+    #[error("failed to write output file `{path}`")]
+    WriteOutput {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("failed to serialize context manifest")]
+    SerializeManifest {
+        #[source]
+        source: serde_json::Error,
+    },
+
     #[error("scan source does not exist: {path}")]
     ScanSourceMissing { path: PathBuf },
 

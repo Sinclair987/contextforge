@@ -8,6 +8,7 @@ use clap::{Parser, Subcommand};
 use crate::{
     audit::{audit_directory, PrivacyFinding},
     config::{write_default_config, DEFAULT_CONFIG_FILE},
+    pack::{pack_directory, PackResult, BUNDLE_FILE, MANIFEST_FILE, REPORT_FILE},
     scanner::{scan_directory, FileKind, ScanOptions, ScanSummary, SkipReason},
     search::{search_directory, SearchHit},
     Result,
@@ -49,6 +50,21 @@ enum Commands {
         #[arg(long)]
         source: PathBuf,
     },
+
+    /// Generate a context bundle, manifest, and report.
+    Pack {
+        /// Directory to pack.
+        #[arg(long)]
+        source: PathBuf,
+
+        /// Context goal used to rank source chunks.
+        #[arg(long)]
+        goal: String,
+
+        /// Maximum estimated tokens for selected context.
+        #[arg(long)]
+        budget: usize,
+    },
 }
 
 pub fn run<I, T>(args: I) -> Result<()>
@@ -63,6 +79,11 @@ where
         Commands::Scan { source } => scan_source_directory(&source),
         Commands::Search { source, query } => search_source_directory(&source, &query),
         Commands::Audit { source } => audit_source_directory(&source),
+        Commands::Pack {
+            source,
+            goal,
+            budget,
+        } => pack_source_directory(&source, &goal, budget),
     }
 }
 
@@ -161,4 +182,19 @@ fn print_audit_findings(findings: &[PrivacyFinding]) {
             finding.evidence
         );
     }
+}
+
+fn pack_source_directory(source: &Path, goal: &str, budget: usize) -> Result<()> {
+    let result = pack_directory(source, goal, budget, Path::new("."))?;
+    print_pack_result(&result);
+    Ok(())
+}
+
+fn print_pack_result(result: &PackResult) {
+    println!("Generated {BUNDLE_FILE}");
+    println!("Generated {MANIFEST_FILE}");
+    println!("Generated {REPORT_FILE}");
+    println!("Selected chunks: {}", result.selected_chunks.len());
+    println!("Used tokens: {}", result.used_tokens);
+    println!("Privacy findings: {}", result.privacy_findings.len());
 }
