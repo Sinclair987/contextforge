@@ -9,18 +9,19 @@ Implemented:
 - `contextforge init`
 - `contextforge scan --source <dir>`
 - `contextforge search --source <dir> <query>`
+- `contextforge audit --source <dir>`
 - default `contextforge.toml` generation
 - recursive directory scanning with default ignores
 - file type and skipped file summaries
 - text extraction for Markdown, TXT, Rust, TOML, and JSON
 - paragraph chunking with source line numbers
 - deterministic keyword-based local search
+- privacy risk auditing for common key, token, database URL, email, phone, private key, and URL token patterns
 - typed error handling for config creation
 - unit and integration tests
 
 Planned next:
 
-- `audit`
 - `pack`
 
 ## Build
@@ -35,6 +36,7 @@ cargo build
 cargo run -- init
 cargo run -- scan --source .
 cargo run -- search --source . "ownership borrowing"
+cargo run -- audit --source .
 ```
 
 The `init` command writes `contextforge.toml` in the current directory and refuses to overwrite an existing config file.
@@ -42,6 +44,8 @@ The `init` command writes `contextforge.toml` in the current directory and refus
 The `scan` command recursively scans a source directory, skips `.git`, `target`, `node_modules`, oversized files, and binary files, then prints file type and skipped item summaries.
 
 The `search` command scans local text files, extracts supported formats, chunks content by paragraph, scores chunks against the query, and prints ranked file path, line number, score, and preview results.
+
+The `audit` command scans local text files for common privacy risk patterns and prints severity, finding type, file path, line number, and a short evidence label.
 
 ## Test
 
@@ -54,6 +58,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 ## Project Structure
 
 - `src/main.rs` contains the binary entry point.
+- `src/audit/` detects privacy risk patterns in extracted text.
 - `src/cli.rs` parses and dispatches CLI commands.
 - `src/chunk/` splits extracted documents into line-aware chunks.
 - `src/config.rs` owns default configuration generation.
@@ -64,3 +69,4 @@ cargo clippy --all-targets --all-features -- -D warnings
 - `tests/cli_init.rs` verifies CLI behavior through the compiled binary.
 - `tests/cli_scan.rs` verifies scanner CLI behavior through the compiled binary.
 - `tests/cli_search.rs` verifies search CLI behavior through the compiled binary.
+- `tests/cli_audit.rs` verifies audit CLI behavior through the compiled binary.

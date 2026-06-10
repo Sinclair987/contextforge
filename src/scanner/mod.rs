@@ -18,6 +18,13 @@ pub enum FileKind {
 
 impl FileKind {
     fn from_path(path: &Path) -> Self {
+        if matches!(
+            path.file_name().and_then(OsStr::to_str),
+            Some(".env") | Some(".env.local") | Some(".env.sample") | Some(".env.example")
+        ) {
+            return Self::Text;
+        }
+
         match path
             .extension()
             .and_then(OsStr::to_str)

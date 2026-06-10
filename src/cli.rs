@@ -6,6 +6,7 @@ use std::{
 use clap::{Parser, Subcommand};
 
 use crate::{
+    audit::{audit_directory, PrivacyFinding},
     config::{write_default_config, DEFAULT_CONFIG_FILE},
     scanner::{scan_directory, FileKind, ScanOptions, ScanSummary, SkipReason},
     search::{search_directory, SearchHit},
@@ -41,6 +42,13 @@ enum Commands {
         /// Search query.
         query: String,
     },
+
+    /// Audit local text files for privacy risks.
+    Audit {
+        /// Directory to audit.
+        #[arg(long)]
+        source: PathBuf,
+    },
 }
 
 pub fn run<I, T>(args: I) -> Result<()>
@@ -54,6 +62,7 @@ where
         Commands::Init => init_current_directory(),
         Commands::Scan { source } => scan_source_directory(&source),
         Commands::Search { source, query } => search_source_directory(&source, &query),
+        Commands::Audit { source } => audit_source_directory(&source),
     }
 }
 
@@ -125,5 +134,31 @@ fn print_search_hits(query: &str, hits: &[SearchHit]) {
             hit.score
         );
         println!("   {}", hit.preview);
+    }
+}
+
+fn audit_source_directory(source: &Path) -> Result<()> {
+    let findings = audit_directory(source)?;
+    print_audit_findings(&findings);
+    Ok(())
+}
+
+fn print_audit_findings(findings: &[PrivacyFinding]) {
+    println!("Privacy findings: {}", findings.len());
+
+    if findings.is_empty() {
+        println!("No privacy risks found.");
+        return;
+    }
+
+    for finding in findings {
+        println!(
+            "{} | {} | {}: line {} | {}",
+            finding.severity.label(),
+            finding.kind.label(),
+            finding.path.display(),
+            finding.line,
+            finding.evidence
+        );
     }
 }
