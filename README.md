@@ -16,7 +16,8 @@ Implemented:
 - file type and skipped file summaries
 - text extraction for Markdown, TXT, Rust, TOML, and JSON
 - paragraph chunking with source line numbers
-- deterministic keyword-based local search
+- explainable deterministic ranking with text, path, file-name, file-kind, and density signals
+- budget-aware context selection with per-file budget guardrails and exclusion reasons
 - privacy risk auditing for common key, token, database URL, email, phone, private key, and URL token patterns
 - context bundle, JSON manifest, and Markdown report generation
 - typed error handling for config creation
@@ -46,11 +47,11 @@ The `init` command writes `contextforge.toml` in the current directory and refus
 
 The `scan` command recursively scans a source directory, skips `.git`, `target`, `node_modules`, oversized files, and binary files, then prints file type and skipped item summaries.
 
-The `search` command scans local text files, extracts supported formats, chunks content by paragraph, scores chunks against the query, and prints ranked file path, line number, score, and preview results.
+The `search` command scans local text files, extracts supported formats, chunks content by paragraph, scores chunks against the query, and prints ranked file path, line number, score, preview, and score reason results.
 
 The `audit` command scans local text files for common privacy risk patterns and prints severity, finding type, file path, line number, and a short evidence label.
 
-The `pack` command selects relevant chunks for a goal within a token budget, runs the privacy audit, and writes `context-bundle.md`, `context-manifest.json`, and `context-report.md` in the current directory.
+The `pack` command selects relevant chunks for a goal within a token budget, applies a per-file budget guardrail to keep one file from dominating the bundle, runs the privacy audit, and writes `context-bundle.md`, `context-manifest.json`, and `context-report.md` in the current directory. The manifest records score breakdowns, selection reasons, excluded chunks, and budget usage.
 
 ## Test
 
@@ -64,12 +65,14 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 - `src/main.rs` contains the binary entry point.
 - `src/audit/` detects privacy risk patterns in extracted text.
+- `src/budget/` selects ranked chunks under global and per-file token budgets.
 - `src/cli.rs` parses and dispatches CLI commands.
 - `src/chunk/` splits extracted documents into line-aware chunks.
 - `src/config.rs` owns default configuration generation.
 - `src/error.rs` defines typed project errors.
 - `src/extract/` reads supported text formats into documents.
 - `src/pack/` generates bundle, manifest, and report outputs.
+- `src/rank/` scores chunks and explains ranking decisions.
 - `src/scanner/` scans directories and records file metadata.
 - `src/search/` ranks chunks against local search queries.
 - `tests/cli_init.rs` verifies CLI behavior through the compiled binary.

@@ -155,6 +155,7 @@ fn print_search_hits(query: &str, hits: &[SearchHit]) {
             hit.score
         );
         println!("   {}", hit.preview);
+        println!("   reason: {}", hit.score_breakdown.summary());
     }
 }
 
@@ -195,6 +196,8 @@ fn print_pack_result(result: &PackResult) {
     println!("Generated {MANIFEST_FILE}");
     println!("Generated {REPORT_FILE}");
     println!("Selected chunks: {}", result.selected_chunks.len());
+    println!("Excluded chunks: {}", result.excluded_chunks.len());
     println!("Used tokens: {}", result.used_tokens);
+    println!("Remaining tokens: {}", result.remaining_tokens);
     println!("Privacy findings: {}", result.privacy_findings.len());
 }

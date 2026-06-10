@@ -48,3 +48,43 @@ fn pack_generates_bundle_manifest_and_report_in_current_directory() {
     assert!(report.contains("ContextForge Report"));
     assert!(report.contains("Selected chunks: 1"));
 }
+
+#[test]
+fn pack_manifest_explains_ranking_and_budget_decisions() {
+    let temp = tempdir().expect("temporary directory");
+    let root = temp.path();
+    let source = root.join("source");
+
+    fs::create_dir_all(source.join("docs")).expect("docs directory");
+    fs::write(
+        source.join("docs/ownership.md"),
+        "ownership borrowing ownership borrowing makes one strong paragraph for ranking\n\nownership borrowing ownership borrowing creates another strong paragraph from the same file\n\nownership borrowing ownership borrowing would exceed the per-file budget guard\n",
+    )
+    .expect("ownership markdown");
+    fs::write(
+        source.join("docs/lifetime.md"),
+        "ownership borrowing lifetime notes give another file a chance inside the same context budget\n",
+    )
+    .expect("lifetime markdown");
+
+    Command::cargo_bin("contextforge")
+        .expect("contextforge binary")
+        .current_dir(root)
+        .args(["pack", "--source"])
+        .arg(&source)
+        .args(["--goal", "ownership borrowing", "--budget", "90"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Selected chunks:"))
+        .stdout(predicate::str::contains("Excluded chunks:"));
+
+    let manifest = fs::read_to_string(root.join("context-manifest.json")).expect("manifest");
+    let report = fs::read_to_string(root.join("context-report.md")).expect("report");
+
+    assert!(manifest.contains("\"score_breakdown\""));
+    assert!(manifest.contains("\"selection_reason\""));
+    assert!(manifest.contains("\"excluded_chunks\""));
+    assert!(manifest.contains("\"per_file_budget_limit\""));
+    assert!(manifest.contains("per-file budget limit"));
+    assert!(report.contains("Excluded chunks:"));
+}

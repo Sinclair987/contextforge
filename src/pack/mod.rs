@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
 };
@@ -7,7 +8,8 @@ use serde::Serialize;
 
 use crate::{
     audit::{audit_directory, PrivacyFinding},
-    search::{search_directory, SearchHit},
+    budget::{BudgetExclusion, BudgetPlanner, BudgetPolicy},
+    rank::{rank_directory, RankedChunk, ScoreBreakdown},
     ContextForgeError, Result,
 };
 
@@ -21,7 +23,10 @@ pub struct PackResult {
     pub manifest_path: PathBuf,
     pub report_path: PathBuf,
     pub used_tokens: usize,
+    pub remaining_tokens: usize,
+    pub budget_policy: BudgetPolicy,
     pub selected_chunks: Vec<PackedChunk>,
+    pub excluded_chunks: Vec<BudgetExclusion>,
     pub privacy_findings: Vec<PrivacyFinding>,
 }
 
@@ -34,6 +39,8 @@ pub struct PackedChunk {
     pub token_estimate: usize,
     pub text: String,
     pub preview: String,
+    pub score_breakdown: ScoreBreakdown,
+    pub selection_reason: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -41,7 +48,11 @@ struct PackManifest<'a> {
     goal: &'a str,
     budget: usize,
     used_tokens: usize,
+    remaining_tokens: usize,
+    per_file_budget_limit: usize,
+    candidate_chunks: usize,
     selected_chunks: &'a [PackedChunk],
+    excluded_chunks: &'a [BudgetExclusion],
     privacy_findings: Vec<ManifestPrivacyFinding>,
     excluded_files: Vec<String>,
 }
@@ -55,18 +66,37 @@ struct ManifestPrivacyFinding {
     evidence: String,
 }
 
+struct RenderContext<'a> {
+    goal: &'a str,
+    budget: usize,
+    used_tokens: usize,
+    remaining_tokens: usize,
+    budget_policy: BudgetPolicy,
+    candidate_count: usize,
+    chunks: &'a [PackedChunk],
+    excluded_chunks: &'a [BudgetExclusion],
+    findings: &'a [PrivacyFinding],
+}
+
 pub fn pack_directory(
     source: &Path,
     goal: &str,
     budget: usize,
     output_dir: &Path,
 ) -> Result<PackResult> {
-    let selected_chunks = select_chunks(search_directory(source, goal)?, budget);
+    let ranked_chunks = rank_directory(source, goal)?;
+    let candidate_count = ranked_chunks.len();
+    let budget_policy = BudgetPolicy::new(budget);
+    let budget_plan = BudgetPlanner::new(budget_policy).select(ranked_chunks);
     let privacy_findings = audit_directory(source)?;
-    let used_tokens = selected_chunks
-        .iter()
-        .map(|chunk| chunk.token_estimate)
-        .sum();
+    let used_tokens = budget_plan.used_tokens;
+    let remaining_tokens = budget_plan.remaining_tokens;
+    let selected_chunks = budget_plan
+        .selected
+        .into_iter()
+        .map(pack_chunk)
+        .collect::<Vec<_>>();
+    let excluded_chunks = budget_plan.excluded;
 
     fs::create_dir_all(output_dir).map_err(|source| ContextForgeError::WriteOutput {
         path: output_dir.to_path_buf(),
@@ -77,93 +107,77 @@ pub fn pack_directory(
     let manifest_path = output_dir.join(MANIFEST_FILE);
     let report_path = output_dir.join(REPORT_FILE);
 
-    write_output(
-        &bundle_path,
-        &render_bundle(
+    {
+        let render_context = RenderContext {
             goal,
             budget,
             used_tokens,
-            &selected_chunks,
-            &privacy_findings,
-        ),
-    )?;
-    write_output(
-        &manifest_path,
-        &render_manifest(
-            goal,
-            budget,
-            used_tokens,
-            &selected_chunks,
-            &privacy_findings,
-        )?,
-    )?;
-    write_output(
-        &report_path,
-        &render_report(
-            goal,
-            budget,
-            used_tokens,
-            &selected_chunks,
-            &privacy_findings,
-        ),
-    )?;
+            remaining_tokens,
+            budget_policy,
+            candidate_count,
+            chunks: &selected_chunks,
+            excluded_chunks: &excluded_chunks,
+            findings: &privacy_findings,
+        };
+
+        write_output(&bundle_path, &render_bundle(&render_context))?;
+        write_output(&manifest_path, &render_manifest(&render_context)?)?;
+        write_output(&report_path, &render_report(&render_context))?;
+    }
 
     Ok(PackResult {
         bundle_path,
         manifest_path,
         report_path,
         used_tokens,
+        remaining_tokens,
+        budget_policy,
         selected_chunks,
+        excluded_chunks,
         privacy_findings,
     })
 }
 
-fn select_chunks(hits: Vec<SearchHit>, budget: usize) -> Vec<PackedChunk> {
-    let mut remaining = budget;
-    let mut selected = Vec::new();
+fn pack_chunk(chunk: RankedChunk) -> PackedChunk {
+    let selection_reason = format!(
+        "selected within global and per-file budgets; {}",
+        chunk.score_breakdown.summary()
+    );
 
-    for hit in hits {
-        if hit.token_estimate > remaining {
-            continue;
-        }
-
-        remaining -= hit.token_estimate;
-        selected.push(PackedChunk {
-            path: hit.path,
-            start_line: hit.start_line,
-            end_line: hit.end_line,
-            score: hit.score,
-            token_estimate: hit.token_estimate,
-            text: hit.text,
-            preview: hit.preview,
-        });
+    PackedChunk {
+        path: chunk.path,
+        start_line: chunk.start_line,
+        end_line: chunk.end_line,
+        score: chunk.score,
+        token_estimate: chunk.token_estimate,
+        text: chunk.text,
+        preview: chunk.preview,
+        score_breakdown: chunk.score_breakdown,
+        selection_reason,
     }
-
-    selected
 }
 
-fn render_bundle(
-    goal: &str,
-    budget: usize,
-    used_tokens: usize,
-    chunks: &[PackedChunk],
-    findings: &[PrivacyFinding],
-) -> String {
+fn render_bundle(context: &RenderContext<'_>) -> String {
     let mut output = String::new();
     output.push_str("# Context Bundle\n\n");
     output.push_str("## Goal\n\n");
-    output.push_str(goal);
+    output.push_str(context.goal);
     output.push_str("\n\n");
     output.push_str("## Budget\n\n");
     output.push_str(&format!(
-        "- Budget: {budget}\n- Used tokens: {used_tokens}\n\n"
+        "- Budget: {budget}\n- Used tokens: {used_tokens}\n- Remaining tokens: {remaining_tokens}\n- Per-file budget limit: {}\n- Excluded chunks: {}\n\n",
+        context.budget_policy.per_file_budget_limit(),
+        context.excluded_chunks.len(),
+        budget = context.budget,
+        used_tokens = context.used_tokens,
+        remaining_tokens = context.remaining_tokens
     ));
     output.push_str("## Selected Context\n\n");
 
-    if chunks.is_empty() {
+    if context.chunks.is_empty() {
         output.push_str("No matching context was selected.\n\n");
     } else {
-        for chunk in chunks {
+        for chunk in context.chunks {
             output.push_str(&format!(
                 "### {}: lines {}-{}\n\n{}\n\n",
                 chunk.path.display(),
@@ -171,14 +185,18 @@ fn render_bundle(
                 chunk.end_line,
                 chunk.text
             ));
+            output.push_str(&format!(
+                "Score: {}\n\nSelection reason: {}\n\n",
+                chunk.score, chunk.selection_reason
+            ));
         }
     }
 
     output.push_str("## Privacy findings\n\n");
-    if findings.is_empty() {
+    if context.findings.is_empty() {
         output.push_str("No privacy risks found.\n");
     } else {
-        for finding in findings {
+        for finding in context.findings {
             output.push_str(&format!(
                 "- {} | {} | {}: line {} | {}\n",
                 finding.severity.label(),
@@ -193,19 +211,18 @@ fn render_bundle(
     output
 }
 
-fn render_manifest(
-    goal: &str,
-    budget: usize,
-    used_tokens: usize,
-    chunks: &[PackedChunk],
-    findings: &[PrivacyFinding],
-) -> Result<String> {
+fn render_manifest(context: &RenderContext<'_>) -> Result<String> {
     let manifest = PackManifest {
-        goal,
-        budget,
-        used_tokens,
-        selected_chunks: chunks,
-        privacy_findings: findings
+        goal: context.goal,
+        budget: context.budget,
+        used_tokens: context.used_tokens,
+        remaining_tokens: context.remaining_tokens,
+        per_file_budget_limit: context.budget_policy.per_file_budget_limit(),
+        candidate_chunks: context.candidate_count,
+        selected_chunks: context.chunks,
+        excluded_chunks: context.excluded_chunks,
+        privacy_findings: context
+            .findings
             .iter()
             .map(|finding| ManifestPrivacyFinding {
                 path: finding.path.clone(),
@@ -215,24 +232,25 @@ fn render_manifest(
                 evidence: finding.evidence.clone(),
             })
             .collect(),
-        excluded_files: Vec::new(),
+        excluded_files: excluded_files(context.excluded_chunks),
     };
 
     serde_json::to_string_pretty(&manifest)
         .map_err(|source| ContextForgeError::SerializeManifest { source })
 }
 
-fn render_report(
-    goal: &str,
-    budget: usize,
-    used_tokens: usize,
-    chunks: &[PackedChunk],
-    findings: &[PrivacyFinding],
-) -> String {
+fn render_report(context: &RenderContext<'_>) -> String {
     format!(
-        "# ContextForge Report\n\n- Goal: {goal}\n- Budget: {budget}\n- Used tokens: {used_tokens}\n- Selected chunks: {}\n- Privacy findings: {}\n",
-        chunks.len(),
-        findings.len()
+        "# ContextForge Report\n\n- Goal: {goal}\n- Budget: {budget}\n- Used tokens: {used_tokens}\n- Remaining tokens: {remaining_tokens}\n- Per-file budget limit: {}\n- Candidate chunks: {candidate_count}\n- Selected chunks: {}\n- Excluded chunks: {}\n- Privacy findings: {}\n",
+        context.budget_policy.per_file_budget_limit(),
+        context.chunks.len(),
+        context.excluded_chunks.len(),
+        context.findings.len(),
+        goal = context.goal,
+        budget = context.budget,
+        used_tokens = context.used_tokens,
+        remaining_tokens = context.remaining_tokens,
+        candidate_count = context.candidate_count
     )
 }
 
@@ -241,4 +259,13 @@ fn write_output(path: &Path, content: &str) -> Result<()> {
         path: path.to_path_buf(),
         source,
     })
+}
+
+fn excluded_files(excluded_chunks: &[BudgetExclusion]) -> Vec<String> {
+    excluded_chunks
+        .iter()
+        .map(|chunk| format!("{}: {}", chunk.path.display(), chunk.reason))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
