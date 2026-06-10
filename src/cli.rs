@@ -8,6 +8,7 @@ use clap::{Parser, Subcommand};
 use crate::{
     config::{write_default_config, DEFAULT_CONFIG_FILE},
     scanner::{scan_directory, FileKind, ScanOptions, ScanSummary, SkipReason},
+    search::{search_directory, SearchHit},
     Result,
 };
 
@@ -30,6 +31,16 @@ enum Commands {
         #[arg(long)]
         source: PathBuf,
     },
+
+    /// Search local text files for relevant context.
+    Search {
+        /// Directory to search.
+        #[arg(long)]
+        source: PathBuf,
+
+        /// Search query.
+        query: String,
+    },
 }
 
 pub fn run<I, T>(args: I) -> Result<()>
@@ -42,6 +53,7 @@ where
     match cli.command {
         Commands::Init => init_current_directory(),
         Commands::Scan { source } => scan_source_directory(&source),
+        Commands::Search { source, query } => search_source_directory(&source, &query),
     }
 }
 
@@ -87,5 +99,31 @@ fn print_skip_count(summary: &ScanSummary, reason: SkipReason) {
     let count = summary.count_by_skip_reason(reason);
     if count > 0 {
         println!("  {}: {count}", reason.label());
+    }
+}
+
+fn search_source_directory(source: &Path, query: &str) -> Result<()> {
+    let hits = search_directory(source, query)?;
+    print_search_hits(query, &hits);
+    Ok(())
+}
+
+fn print_search_hits(query: &str, hits: &[SearchHit]) {
+    println!("Search results for: {query}");
+
+    if hits.is_empty() {
+        println!("No matches found.");
+        return;
+    }
+
+    for (index, hit) in hits.iter().enumerate() {
+        let rank = index + 1;
+        println!(
+            "{rank}. {}: line {} | score {}",
+            hit.path.display(),
+            hit.start_line,
+            hit.score
+        );
+        println!("   {}", hit.preview);
     }
 }

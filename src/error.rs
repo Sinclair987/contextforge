@@ -47,4 +47,7 @@ pub enum ContextForgeError {
         #[source]
         source: std::io::Error,
     },
+
+    #[error("unsupported file kind for extraction: {path}")]
+    UnsupportedFileKind { path: PathBuf },
 }
