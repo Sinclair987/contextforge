@@ -34,3 +34,26 @@ fn audit_reports_privacy_findings_with_severity_and_location() {
         .stdout(predicate::str::contains(".env.sample"))
         .stdout(predicate::str::contains("line 1"));
 }
+
+#[test]
+fn audit_can_emit_json_findings() {
+    let temp = tempdir().expect("temporary directory");
+    let root = temp.path();
+
+    fs::write(
+        root.join(".env.sample"),
+        "SERVICE_API_KEY=demo-sensitive-value-123456\n",
+    )
+    .expect("sample env file");
+
+    Command::cargo_bin("contextforge")
+        .expect("contextforge binary")
+        .args(["audit", "--source"])
+        .arg(root)
+        .args(["--format", "json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"findings\""))
+        .stdout(predicate::str::contains("\"kind\": \"API key\""))
+        .stdout(predicate::str::contains("\"severity\": \"High\""));
+}

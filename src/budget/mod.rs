@@ -172,6 +172,8 @@ mod tests {
     fn ranked(path: &str, score: usize, tokens: usize) -> RankedChunk {
         RankedChunk {
             path: PathBuf::from(path),
+            kind: crate::chunk::ChunkKind::MarkdownSection,
+            title: Some("Ownership".to_string()),
             start_line: 1,
             end_line: 1,
             score,
@@ -181,6 +183,7 @@ mod tests {
             score_breakdown: ScoreBreakdown {
                 text_match_score: score,
                 path_match_score: 0,
+                title_match_score: 0,
                 file_name_match_score: 0,
                 file_kind_score: 0,
                 density_score: 0,

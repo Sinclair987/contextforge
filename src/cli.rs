@@ -3,15 +3,19 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+use serde::Serialize;
 
 use crate::{
-    audit::{audit_directory, PrivacyFinding},
+    audit::{audit_directory, PrivacyFinding, Severity},
     config::{write_default_config, DEFAULT_CONFIG_FILE},
-    pack::{pack_directory, PackResult, BUNDLE_FILE, MANIFEST_FILE, REPORT_FILE},
+    pack::{
+        pack_directory_with_options, PackOptions, PackResult, BUNDLE_FILE, MANIFEST_FILE,
+        REPORT_FILE,
+    },
     scanner::{scan_directory, FileKind, ScanOptions, ScanSummary, SkipReason},
     search::{search_directory, SearchHit},
-    Result,
+    ContextForgeError, Result,
 };
 
 #[derive(Debug, Parser)]
@@ -49,6 +53,10 @@ enum Commands {
         /// Directory to audit.
         #[arg(long)]
         source: PathBuf,
+
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = AuditFormat::Text)]
+        format: AuditFormat,
     },
 
     /// Generate a context bundle, manifest, and report.
@@ -64,7 +72,52 @@ enum Commands {
         /// Maximum estimated tokens for selected context.
         #[arg(long)]
         budget: usize,
+
+        /// Replace selected sensitive lines with redaction markers.
+        #[arg(long)]
+        redact: bool,
+
+        /// Fail if the privacy audit finds this severity or higher.
+        #[arg(long, value_enum)]
+        fail_on: Option<CliSeverity>,
     },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum AuditFormat {
+    Text,
+    Json,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliSeverity {
+    Low,
+    Medium,
+    High,
+}
+
+impl From<CliSeverity> for Severity {
+    fn from(value: CliSeverity) -> Self {
+        match value {
+            CliSeverity::Low => Self::Low,
+            CliSeverity::Medium => Self::Medium,
+            CliSeverity::High => Self::High,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct AuditJsonReport {
+    findings: Vec<AuditJsonFinding>,
+}
+
+#[derive(Debug, Serialize)]
+struct AuditJsonFinding {
+    path: String,
+    line: usize,
+    kind: String,
+    severity: String,
+    evidence: String,
 }
 
 pub fn run<I, T>(args: I) -> Result<()>
@@ -78,12 +131,14 @@ where
         Commands::Init => init_current_directory(),
         Commands::Scan { source } => scan_source_directory(&source),
         Commands::Search { source, query } => search_source_directory(&source, &query),
-        Commands::Audit { source } => audit_source_directory(&source),
+        Commands::Audit { source, format } => audit_source_directory(&source, format),
         Commands::Pack {
             source,
             goal,
             budget,
-        } => pack_source_directory(&source, &goal, budget),
+            redact,
+            fail_on,
+        } => pack_source_directory(&source, &goal, budget, redact, fail_on.map(Severity::from)),
     }
 }
 
@@ -149,19 +204,27 @@ fn print_search_hits(query: &str, hits: &[SearchHit]) {
     for (index, hit) in hits.iter().enumerate() {
         let rank = index + 1;
         println!(
-            "{rank}. {}: line {} | score {}",
+            "{rank}. {}: lines {}-{} | {} | score {}",
             hit.path.display(),
             hit.start_line,
+            hit.end_line,
+            hit.kind.label(),
             hit.score
         );
+        if let Some(title) = &hit.title {
+            println!("   title: {title}");
+        }
         println!("   {}", hit.preview);
         println!("   reason: {}", hit.score_breakdown.summary());
     }
 }
 
-fn audit_source_directory(source: &Path) -> Result<()> {
+fn audit_source_directory(source: &Path, format: AuditFormat) -> Result<()> {
     let findings = audit_directory(source)?;
-    print_audit_findings(&findings);
+    match format {
+        AuditFormat::Text => print_audit_findings(&findings),
+        AuditFormat::Json => print_json_audit_findings(&findings)?,
+    }
     Ok(())
 }
 
@@ -185,8 +248,39 @@ fn print_audit_findings(findings: &[PrivacyFinding]) {
     }
 }
 
-fn pack_source_directory(source: &Path, goal: &str, budget: usize) -> Result<()> {
-    let result = pack_directory(source, goal, budget, Path::new("."))?;
+fn print_json_audit_findings(findings: &[PrivacyFinding]) -> Result<()> {
+    let report = AuditJsonReport {
+        findings: findings
+            .iter()
+            .map(|finding| AuditJsonFinding {
+                path: finding.path.display().to_string(),
+                line: finding.line,
+                kind: finding.kind.label().to_string(),
+                severity: finding.severity.label().to_string(),
+                evidence: finding.evidence.clone(),
+            })
+            .collect(),
+    };
+    let output = serde_json::to_string_pretty(&report)
+        .map_err(|source| ContextForgeError::SerializeOutput { source })?;
+    println!("{output}");
+    Ok(())
+}
+
+fn pack_source_directory(
+    source: &Path,
+    goal: &str,
+    budget: usize,
+    redact: bool,
+    fail_on: Option<Severity>,
+) -> Result<()> {
+    let result = pack_directory_with_options(
+        source,
+        goal,
+        budget,
+        Path::new("."),
+        PackOptions { redact, fail_on },
+    )?;
     print_pack_result(&result);
     Ok(())
 }
@@ -200,4 +294,12 @@ fn print_pack_result(result: &PackResult) {
     println!("Used tokens: {}", result.used_tokens);
     println!("Remaining tokens: {}", result.remaining_tokens);
     println!("Privacy findings: {}", result.privacy_findings.len());
+    println!(
+        "Redaction: {}",
+        if result.redaction_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
 }

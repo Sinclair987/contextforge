@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::{
-    chunk::{split_document, Chunk},
+    chunk::{split_document, Chunk, ChunkKind},
     extract::{Extractor, TextExtractor},
     scanner::{scan_directory, ScanOptions},
     Result,
@@ -42,6 +42,7 @@ impl QueryTerms {
 pub struct ScoringProfile {
     pub text_match_weight: usize,
     pub path_match_weight: usize,
+    pub title_match_weight: usize,
     pub file_name_match_weight: usize,
     pub density_weight: usize,
 }
@@ -51,6 +52,7 @@ impl Default for ScoringProfile {
         Self {
             text_match_weight: 3,
             path_match_weight: 2,
+            title_match_weight: 4,
             file_name_match_weight: 3,
             density_weight: 2,
         }
@@ -80,6 +82,11 @@ impl ChunkScorer for DefaultScorer {
 
         let text = chunk.text.to_ascii_lowercase();
         let path = chunk.path.to_string_lossy().to_ascii_lowercase();
+        let title = chunk
+            .title
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .unwrap_or_default();
         let file_name = chunk
             .path
             .file_name()
@@ -88,8 +95,9 @@ impl ChunkScorer for DefaultScorer {
 
         let text_matches = count_matches(&text, terms.as_slice());
         let path_matches = count_matches(&path, terms.as_slice());
+        let title_matches = count_matches(&title, terms.as_slice());
         let file_name_matches = count_matches(&file_name, terms.as_slice());
-        let total_matches = text_matches + path_matches + file_name_matches;
+        let total_matches = text_matches + path_matches + title_matches + file_name_matches;
 
         if total_matches == 0 {
             return None;
@@ -97,11 +105,14 @@ impl ChunkScorer for DefaultScorer {
 
         let text_match_score = text_matches * self.profile.text_match_weight;
         let path_match_score = path_matches * self.profile.path_match_weight;
+        let title_match_score = title_matches * self.profile.title_match_weight;
         let file_name_match_score = file_name_matches * self.profile.file_name_match_weight;
-        let file_kind_score = file_kind_bonus(&chunk.path);
+        let chunk_kind_score = chunk_kind_bonus(chunk.kind);
+        let file_kind_score = file_kind_bonus(&chunk.path) + chunk_kind_score;
         let density_score = density_bonus(text_matches, terms.as_slice().len(), self.profile);
         let total_score = text_match_score
             + path_match_score
+            + title_match_score
             + file_name_match_score
             + file_kind_score
             + density_score;
@@ -117,6 +128,12 @@ impl ChunkScorer for DefaultScorer {
             reasons.push(format!(
                 "path matches: {path_matches} x {}",
                 self.profile.path_match_weight
+            ));
+        }
+        if title_matches > 0 {
+            reasons.push(format!(
+                "title matches: {title_matches} x {}",
+                self.profile.title_match_weight
             ));
         }
         if file_name_matches > 0 {
@@ -135,6 +152,7 @@ impl ChunkScorer for DefaultScorer {
         Some(ScoreBreakdown {
             text_match_score,
             path_match_score,
+            title_match_score,
             file_name_match_score,
             file_kind_score,
             density_score,
@@ -148,6 +166,7 @@ impl ChunkScorer for DefaultScorer {
 pub struct ScoreBreakdown {
     pub text_match_score: usize,
     pub path_match_score: usize,
+    pub title_match_score: usize,
     pub file_name_match_score: usize,
     pub file_kind_score: usize,
     pub density_score: usize,
@@ -168,6 +187,8 @@ impl ScoreBreakdown {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RankedChunk {
     pub path: PathBuf,
+    pub kind: ChunkKind,
+    pub title: Option<String>,
     pub start_line: usize,
     pub end_line: usize,
     pub score: usize,
@@ -217,6 +238,8 @@ where
         let preview = preview(&chunk.text);
         ranked.push(RankedChunk {
             path: chunk.path,
+            kind: chunk.kind,
+            title: chunk.title,
             start_line: chunk.start_line,
             end_line: chunk.end_line,
             score: score_breakdown.total_score,
@@ -265,6 +288,14 @@ fn file_kind_bonus(path: &Path) -> usize {
     }
 }
 
+fn chunk_kind_bonus(kind: ChunkKind) -> usize {
+    match kind {
+        ChunkKind::MarkdownSection => 3,
+        ChunkKind::RustItem => 4,
+        ChunkKind::Paragraph => 0,
+    }
+}
+
 fn preview(text: &str) -> String {
     let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
     const MAX_PREVIEW_CHARS: usize = 160;
@@ -285,6 +316,8 @@ mod tests {
         let chunks = vec![
             Chunk {
                 path: PathBuf::from("docs/notes.txt"),
+                kind: ChunkKind::Paragraph,
+                title: None,
                 start_line: 1,
                 end_line: 1,
                 text: "ownership only".to_string(),
@@ -292,6 +325,8 @@ mod tests {
             },
             Chunk {
                 path: PathBuf::from("docs/ownership.md"),
+                kind: ChunkKind::MarkdownSection,
+                title: Some("Ownership".to_string()),
                 start_line: 4,
                 end_line: 4,
                 text: "ownership borrowing ownership".to_string(),

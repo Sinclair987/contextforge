@@ -7,8 +7,9 @@ use std::{
 use serde::Serialize;
 
 use crate::{
-    audit::{audit_directory, PrivacyFinding},
+    audit::{audit_directory, PrivacyFinding, Severity},
     budget::{BudgetExclusion, BudgetPlanner, BudgetPolicy},
+    chunk::ChunkKind,
     rank::{rank_directory, RankedChunk, ScoreBreakdown},
     ContextForgeError, Result,
 };
@@ -16,6 +17,12 @@ use crate::{
 pub const BUNDLE_FILE: &str = "context-bundle.md";
 pub const MANIFEST_FILE: &str = "context-manifest.json";
 pub const REPORT_FILE: &str = "context-report.md";
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PackOptions {
+    pub redact: bool,
+    pub fail_on: Option<Severity>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackResult {
@@ -25,6 +32,8 @@ pub struct PackResult {
     pub used_tokens: usize,
     pub remaining_tokens: usize,
     pub budget_policy: BudgetPolicy,
+    pub redaction_enabled: bool,
+    pub redacted: bool,
     pub selected_chunks: Vec<PackedChunk>,
     pub excluded_chunks: Vec<BudgetExclusion>,
     pub privacy_findings: Vec<PrivacyFinding>,
@@ -33,6 +42,8 @@ pub struct PackResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PackedChunk {
     pub path: PathBuf,
+    pub kind: ChunkKind,
+    pub title: Option<String>,
     pub start_line: usize,
     pub end_line: usize,
     pub score: usize,
@@ -41,6 +52,7 @@ pub struct PackedChunk {
     pub preview: String,
     pub score_breakdown: ScoreBreakdown,
     pub selection_reason: String,
+    pub redacted: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -51,6 +63,8 @@ struct PackManifest<'a> {
     remaining_tokens: usize,
     per_file_budget_limit: usize,
     candidate_chunks: usize,
+    redaction_enabled: bool,
+    redacted: bool,
     selected_chunks: &'a [PackedChunk],
     excluded_chunks: &'a [BudgetExclusion],
     privacy_findings: Vec<ManifestPrivacyFinding>,
@@ -73,6 +87,8 @@ struct RenderContext<'a> {
     remaining_tokens: usize,
     budget_policy: BudgetPolicy,
     candidate_count: usize,
+    redaction_enabled: bool,
+    redacted: bool,
     chunks: &'a [PackedChunk],
     excluded_chunks: &'a [BudgetExclusion],
     findings: &'a [PrivacyFinding],
@@ -84,18 +100,32 @@ pub fn pack_directory(
     budget: usize,
     output_dir: &Path,
 ) -> Result<PackResult> {
+    pack_directory_with_options(source, goal, budget, output_dir, PackOptions::default())
+}
+
+pub fn pack_directory_with_options(
+    source: &Path,
+    goal: &str,
+    budget: usize,
+    output_dir: &Path,
+    options: PackOptions,
+) -> Result<PackResult> {
     let ranked_chunks = rank_directory(source, goal)?;
     let candidate_count = ranked_chunks.len();
     let budget_policy = BudgetPolicy::new(budget);
     let budget_plan = BudgetPlanner::new(budget_policy).select(ranked_chunks);
     let privacy_findings = audit_directory(source)?;
+    validate_privacy_gate(&privacy_findings, options.fail_on)?;
+
     let used_tokens = budget_plan.used_tokens;
     let remaining_tokens = budget_plan.remaining_tokens;
     let selected_chunks = budget_plan
         .selected
         .into_iter()
-        .map(pack_chunk)
+        .map(|chunk| pack_chunk(chunk, &privacy_findings, options.redact))
         .collect::<Vec<_>>();
+    let redaction_enabled = options.redact;
+    let redacted = selected_chunks.iter().any(|chunk| chunk.redacted);
     let excluded_chunks = budget_plan.excluded;
 
     fs::create_dir_all(output_dir).map_err(|source| ContextForgeError::WriteOutput {
@@ -115,6 +145,8 @@ pub fn pack_directory(
             remaining_tokens,
             budget_policy,
             candidate_count,
+            redaction_enabled,
+            redacted,
             chunks: &selected_chunks,
             excluded_chunks: &excluded_chunks,
             findings: &privacy_findings,
@@ -132,28 +164,43 @@ pub fn pack_directory(
         used_tokens,
         remaining_tokens,
         budget_policy,
+        redaction_enabled,
+        redacted,
         selected_chunks,
         excluded_chunks,
         privacy_findings,
     })
 }
 
-fn pack_chunk(chunk: RankedChunk) -> PackedChunk {
+fn pack_chunk(chunk: RankedChunk, findings: &[PrivacyFinding], redact: bool) -> PackedChunk {
     let selection_reason = format!(
         "selected within global and per-file budgets; {}",
         chunk.score_breakdown.summary()
     );
+    let (text, redacted) = if redact {
+        redact_chunk_text(&chunk, findings)
+    } else {
+        (chunk.text, false)
+    };
+    let preview = if redacted {
+        preview(&text)
+    } else {
+        chunk.preview
+    };
 
     PackedChunk {
         path: chunk.path,
+        kind: chunk.kind,
+        title: chunk.title,
         start_line: chunk.start_line,
         end_line: chunk.end_line,
         score: chunk.score,
         token_estimate: chunk.token_estimate,
-        text: chunk.text,
-        preview: chunk.preview,
+        text,
+        preview,
         score_breakdown: chunk.score_breakdown,
         selection_reason,
+        redacted,
     }
 }
 
@@ -172,17 +219,32 @@ fn render_bundle(context: &RenderContext<'_>) -> String {
         used_tokens = context.used_tokens,
         remaining_tokens = context.remaining_tokens
     ));
+    output.push_str(&format!(
+        "- Redaction: {}\n\n",
+        if context.redaction_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    ));
     output.push_str("## Selected Context\n\n");
 
     if context.chunks.is_empty() {
         output.push_str("No matching context was selected.\n\n");
     } else {
         for chunk in context.chunks {
+            let title = chunk
+                .title
+                .as_deref()
+                .map(|title| format!(" | {title}"))
+                .unwrap_or_default();
             output.push_str(&format!(
-                "### {}: lines {}-{}\n\n{}\n\n",
+                "### {}: lines {}-{} | {}{}\n\n{}\n\n",
                 chunk.path.display(),
                 chunk.start_line,
                 chunk.end_line,
+                chunk.kind.label(),
+                title,
                 chunk.text
             ));
             output.push_str(&format!(
@@ -219,6 +281,8 @@ fn render_manifest(context: &RenderContext<'_>) -> Result<String> {
         remaining_tokens: context.remaining_tokens,
         per_file_budget_limit: context.budget_policy.per_file_budget_limit(),
         candidate_chunks: context.candidate_count,
+        redaction_enabled: context.redaction_enabled,
+        redacted: context.redacted,
         selected_chunks: context.chunks,
         excluded_chunks: context.excluded_chunks,
         privacy_findings: context
@@ -241,11 +305,17 @@ fn render_manifest(context: &RenderContext<'_>) -> Result<String> {
 
 fn render_report(context: &RenderContext<'_>) -> String {
     format!(
-        "# ContextForge Report\n\n- Goal: {goal}\n- Budget: {budget}\n- Used tokens: {used_tokens}\n- Remaining tokens: {remaining_tokens}\n- Per-file budget limit: {}\n- Candidate chunks: {candidate_count}\n- Selected chunks: {}\n- Excluded chunks: {}\n- Privacy findings: {}\n",
+        "# ContextForge Report\n\n- Goal: {goal}\n- Budget: {budget}\n- Used tokens: {used_tokens}\n- Remaining tokens: {remaining_tokens}\n- Per-file budget limit: {}\n- Candidate chunks: {candidate_count}\n- Selected chunks: {}\n- Excluded chunks: {}\n- Privacy findings: {}\n- Redaction: {}\n- Redacted chunks: {}\n",
         context.budget_policy.per_file_budget_limit(),
         context.chunks.len(),
         context.excluded_chunks.len(),
         context.findings.len(),
+        if context.redaction_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        },
+        context.chunks.iter().filter(|chunk| chunk.redacted).count(),
         goal = context.goal,
         budget = context.budget,
         used_tokens = context.used_tokens,
@@ -268,4 +338,54 @@ fn excluded_files(excluded_chunks: &[BudgetExclusion]) -> Vec<String> {
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
+}
+
+fn validate_privacy_gate(findings: &[PrivacyFinding], threshold: Option<Severity>) -> Result<()> {
+    let Some(threshold) = threshold else {
+        return Ok(());
+    };
+
+    let count = findings
+        .iter()
+        .filter(|finding| finding.severity.is_at_least(threshold))
+        .count();
+
+    if count == 0 {
+        return Ok(());
+    }
+
+    Err(ContextForgeError::PrivacyGateFailed {
+        severity: threshold.label().to_string(),
+        count,
+    })
+}
+
+fn redact_chunk_text(chunk: &RankedChunk, findings: &[PrivacyFinding]) -> (String, bool) {
+    let mut redacted = false;
+    let mut lines = Vec::new();
+
+    for (offset, line) in chunk.text.lines().enumerate() {
+        let source_line = chunk.start_line + offset;
+        if let Some(finding) = findings
+            .iter()
+            .find(|finding| finding.path == chunk.path && finding.line == source_line)
+        {
+            redacted = true;
+            lines.push(format!("[REDACTED: {}]", finding.kind.label()));
+        } else {
+            lines.push(line.to_string());
+        }
+    }
+
+    (lines.join("\n"), redacted)
+}
+
+fn preview(text: &str) -> String {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    const MAX_PREVIEW_CHARS: usize = 160;
+    if collapsed.chars().count() <= MAX_PREVIEW_CHARS {
+        return collapsed;
+    }
+
+    collapsed.chars().take(MAX_PREVIEW_CHARS).collect()
 }

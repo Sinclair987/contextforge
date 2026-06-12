@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::{
+    chunk::ChunkKind,
     rank::{rank_directory, ScoreBreakdown},
     Result,
 };
@@ -8,6 +9,8 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchHit {
     pub path: PathBuf,
+    pub kind: ChunkKind,
+    pub title: Option<String>,
     pub start_line: usize,
     pub end_line: usize,
     pub score: usize,
@@ -23,6 +26,8 @@ pub fn search_directory(source: &Path, query: &str) -> Result<Vec<SearchHit>> {
             .into_iter()
             .map(|chunk| SearchHit {
                 path: chunk.path,
+                kind: chunk.kind,
+                title: chunk.title,
                 start_line: chunk.start_line,
                 end_line: chunk.end_line,
                 score: chunk.score,
@@ -57,6 +62,8 @@ mod tests {
 
         assert_eq!(hits.len(), 1);
         assert!(hits[0].path.ends_with("rust.md"));
+        assert_eq!(hits[0].kind, ChunkKind::MarkdownSection);
+        assert_eq!(hits[0].title.as_deref(), Some("Ownership"));
         assert_eq!(hits[0].start_line, 1);
         assert!(hits[0].score > 0);
         assert!(hits[0].preview.contains("Ownership and borrowing"));

@@ -27,6 +27,15 @@ pub enum ContextForgeError {
         source: serde_json::Error,
     },
 
+    #[error("failed to serialize command output")]
+    SerializeOutput {
+        #[source]
+        source: serde_json::Error,
+    },
+
+    #[error("privacy gate failed: {count} finding(s) at or above {severity}")]
+    PrivacyGateFailed { severity: String, count: usize },
+
     #[error("scan source does not exist: {path}")]
     ScanSourceMissing { path: PathBuf },
 

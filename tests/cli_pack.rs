@@ -88,3 +88,71 @@ fn pack_manifest_explains_ranking_and_budget_decisions() {
     assert!(manifest.contains("per-file budget limit"));
     assert!(report.contains("Excluded chunks:"));
 }
+
+#[test]
+fn pack_redacts_selected_sensitive_lines_when_requested() {
+    let temp = tempdir().expect("temporary directory");
+    let root = temp.path();
+    let source = root.join("source");
+
+    fs::create_dir_all(&source).expect("source directory");
+    fs::write(
+        source.join("notes.md"),
+        "# Deploy\nownership borrowing release note\nSERVICE_API_KEY=demo-sensitive-value-123456\n",
+    )
+    .expect("notes file");
+
+    Command::cargo_bin("contextforge")
+        .expect("contextforge binary")
+        .current_dir(root)
+        .args(["pack", "--source"])
+        .arg(&source)
+        .args([
+            "--goal",
+            "ownership borrowing",
+            "--budget",
+            "160",
+            "--redact",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Redaction: enabled"));
+
+    let bundle = fs::read_to_string(root.join("context-bundle.md")).expect("bundle");
+    let manifest = fs::read_to_string(root.join("context-manifest.json")).expect("manifest");
+
+    assert!(bundle.contains("[REDACTED: API key]"));
+    assert!(!bundle.contains("demo-sensitive-value-123456"));
+    assert!(manifest.contains("\"redacted\": true"));
+}
+
+#[test]
+fn pack_can_fail_on_configured_privacy_severity() {
+    let temp = tempdir().expect("temporary directory");
+    let root = temp.path();
+    let source = root.join("source");
+
+    fs::create_dir_all(&source).expect("source directory");
+    fs::write(
+        source.join("notes.md"),
+        "# Deploy\nownership borrowing release note\nSERVICE_API_KEY=demo-sensitive-value-123456\n",
+    )
+    .expect("notes file");
+
+    Command::cargo_bin("contextforge")
+        .expect("contextforge binary")
+        .current_dir(root)
+        .args(["pack", "--source"])
+        .arg(&source)
+        .args([
+            "--goal",
+            "ownership borrowing",
+            "--budget",
+            "160",
+            "--fail-on",
+            "high",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("privacy gate failed"));
+}

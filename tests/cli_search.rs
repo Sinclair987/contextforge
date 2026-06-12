@@ -27,7 +27,9 @@ fn search_returns_relevant_file_path_line_score_and_preview() {
             "Search results for: ownership borrowing",
         ))
         .stdout(predicate::str::contains("rust.md"))
-        .stdout(predicate::str::contains("line 1"))
+        .stdout(predicate::str::contains("lines 1-2"))
+        .stdout(predicate::str::contains("markdown section"))
+        .stdout(predicate::str::contains("title: Ownership"))
         .stdout(predicate::str::contains("score"))
         .stdout(predicate::str::contains("Rust ownership and borrowing"))
         .stdout(predicate::str::contains("notes.txt").not());
