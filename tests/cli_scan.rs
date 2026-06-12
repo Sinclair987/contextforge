@@ -37,3 +37,28 @@ fn scan_reports_file_types_and_skip_reasons() {
         .stdout(predicate::str::contains("Binary: 1"))
         .stdout(predicate::str::contains("Ignored directory: 2"));
 }
+
+#[test]
+fn scan_uses_contextforge_toml_when_present() {
+    let temp = tempdir().expect("temporary directory");
+    let root = temp.path();
+    let source = root.join("source");
+
+    fs::create_dir_all(&source).expect("source directory");
+    fs::write(source.join("large.txt"), "123456789").expect("large text file");
+    fs::write(
+        root.join("contextforge.toml"),
+        "[scanner]\nmax_file_bytes = 4\nignore_patterns = [\"target\", \".git\", \"node_modules\"]\n",
+    )
+    .expect("config file");
+
+    Command::cargo_bin("contextforge")
+        .expect("contextforge binary")
+        .current_dir(root)
+        .args(["scan", "--source"])
+        .arg(&source)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Scanned files: 0"))
+        .stdout(predicate::str::contains("Too large: 1"));
+}

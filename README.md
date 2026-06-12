@@ -1,6 +1,6 @@
 # ContextForge
 
-ContextForge is a local Rust CLI for compiling project files into auditable AI context bundles. The final project will scan local files, extract text, rank relevant chunks, audit privacy risks, and generate bundle, manifest, and report outputs.
+ContextForge is a local Rust CLI for compiling project files into auditable context bundles. The final project will scan local files, extract text, rank relevant chunks, audit privacy risks, and generate bundle, manifest, and report outputs.
 
 ## Current Status
 
@@ -10,23 +10,27 @@ Implemented:
 - `contextforge scan --source <dir>`
 - `contextforge search --source <dir> <query>`
 - `contextforge audit --source <dir> [--format text|json]`
-- `contextforge pack --source <dir> --goal <text> --budget <n> [--redact] [--fail-on low|medium|high]`
+- `contextforge metrics --source <dir> [--format text|json]`
+- `contextforge pack --source <dir> --goal <text> --budget <n> [--output-dir <dir>] [--redact] [--fail-on low|medium|high]`
 - default `contextforge.toml` generation
+- automatic `contextforge.toml` loading, with optional global `--config <path>`
 - recursive directory scanning with default ignores
 - file type and skipped file summaries
-- text extraction for Markdown, TXT, Rust, TOML, and JSON
+- text extraction for Markdown, TXT, Rust, TOML, JSON, PDF, and DOCX
 - smart chunking for Markdown sections, Rust items, and plain paragraphs with source line numbers
 - explainable deterministic ranking with text, title, path, file-name, file-kind, chunk-kind, and density signals
 - budget-aware context selection with per-file budget guardrails and exclusion reasons
 - privacy risk auditing for common key, token, database URL, email, phone, private key, URL token, and instruction override patterns
 - JSON privacy audit output, severity gates, and optional selected-line redaction during packing
-- context bundle, JSON manifest, and Markdown report generation
+- Rust project metrics for effective lines, module/type/test signals, risk calls, and requirement checks
+- configurable output directory and output file names
+- context bundle, JSON manifest, and Markdown report generation with selection and privacy statistics
 - typed error handling for config creation
 - unit and integration tests
 
 Planned next:
 
-- reporting polish and final demonstration assets
+- ranking algorithm improvements and final demonstration assets
 
 ## Build
 
@@ -42,19 +46,38 @@ cargo run -- scan --source .
 cargo run -- search --source . "ownership borrowing"
 cargo run -- audit --source .
 cargo run -- audit --source . --format json
+cargo run -- metrics --source .
+cargo run -- metrics --source . --format json
 cargo run -- pack --source . --goal "ownership borrowing" --budget 500
+cargo run -- pack --source . --goal "ownership borrowing" --budget 500 --output-dir out
 cargo run -- pack --source . --goal "ownership borrowing" --budget 500 --redact --fail-on high
+cargo run -- --config .\contextforge.toml scan --source .
 ```
 
-The `init` command writes `contextforge.toml` in the current directory and refuses to overwrite an existing config file.
+The `init` command writes `contextforge.toml` in the current directory and refuses to overwrite an existing config file. Commands automatically load `contextforge.toml` from the current directory when present. Use the global `--config <path>` option to load a specific configuration file.
 
-The `scan` command recursively scans a source directory, skips `.git`, `target`, `node_modules`, oversized files, and binary files, then prints file type and skipped item summaries.
+Currently supported configuration fields:
 
-The `search` command scans local text files, extracts supported formats, chunks content by Markdown heading, Rust top-level item, or paragraph, scores chunks against the query, and prints ranked file path, line range, chunk type, optional title, score, preview, and score reason results.
+```toml
+[scanner]
+max_file_bytes = 1048576
+ignore_patterns = [".git", "target", "node_modules"]
 
-The `audit` command scans local text files for common privacy risk patterns and prints severity, finding type, file path, line number, and a short evidence label. Use `--format json` for machine-readable audit results.
+[output]
+bundle = "context-bundle.md"
+manifest = "context-manifest.json"
+report = "context-report.md"
+```
 
-The `pack` command selects relevant chunks for a goal within a token budget, applies a per-file budget guardrail to keep one file from dominating the bundle, runs the privacy audit, and writes `context-bundle.md`, `context-manifest.json`, and `context-report.md` in the current directory. The manifest records chunk type, title, score breakdowns, selection reasons, excluded chunks, budget usage, privacy findings, redaction status, and severity gate behavior. Use `--redact` to replace selected sensitive lines with `[REDACTED: <type>]`, and `--fail-on <severity>` to stop packing when findings meet or exceed the selected severity.
+The `scan` command recursively scans a source directory, skips configured ignored directories, oversized files, and unsupported binary files, then prints file type and skipped item summaries. Supported binary document formats such as PDF and DOCX are kept for extraction.
+
+The `search` command scans local files, extracts supported formats, chunks content by Markdown heading, Rust top-level item, or paragraph, scores chunks against the query, and prints ranked file path, line range, chunk type, optional title, score, preview, and score reason results. PDF and DOCX files are extracted into plain text before chunking.
+
+The `audit` command scans extracted text for common privacy risk patterns and prints severity, finding type, file path, line number, and a short evidence label. Use `--format json` for machine-readable audit results.
+
+The `metrics` command analyzes Rust source files while skipping generated/build directories. It reports total and effective Rust lines, `src` and `tests` line counts, module declarations, `struct`/`enum`/`trait`/`impl` usage, function and test counts, `Result` usage, and risk signals such as `unwrap`, `expect`, `panic!`, `todo!`, and `unsafe`. Its requirement signals are intended to help judge whether the project visibly satisfies the course's engineering expectations.
+
+The `pack` command selects relevant chunks for a goal within a token budget, applies a per-file budget guardrail to keep one file from dominating the bundle, runs the privacy audit, and writes `context-bundle.md`, `context-manifest.json`, and `context-report.md` in the current directory or a directory supplied with `--output-dir`. The manifest records chunk type, title, score breakdowns, selection reasons, excluded chunks, budget usage, privacy findings, redaction status, selected chunk type counts, privacy severity counts, and privacy finding type counts. Use `--redact` to replace selected sensitive lines with `[REDACTED: <type>]`, and `--fail-on <severity>` to stop packing when findings meet or exceed the selected severity.
 
 ## Test
 
@@ -74,6 +97,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 - `src/config.rs` owns default configuration generation.
 - `src/error.rs` defines typed project errors.
 - `src/extract/` reads supported text formats into documents.
+- `src/metrics/` analyzes Rust project scale, feature signals, tests, and risk calls.
 - `src/pack/` generates bundle, manifest, and report outputs.
 - `src/rank/` scores chunks and explains ranking decisions.
 - `src/scanner/` scans directories and records file metadata.
@@ -82,4 +106,5 @@ cargo clippy --all-targets --all-features -- -D warnings
 - `tests/cli_scan.rs` verifies scanner CLI behavior through the compiled binary.
 - `tests/cli_search.rs` verifies search CLI behavior through the compiled binary.
 - `tests/cli_audit.rs` verifies audit CLI behavior through the compiled binary.
+- `tests/cli_metrics.rs` verifies metrics CLI behavior through the compiled binary.
 - `tests/cli_pack.rs` verifies pack CLI behavior through the compiled binary.

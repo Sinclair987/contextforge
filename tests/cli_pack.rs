@@ -50,6 +50,80 @@ fn pack_generates_bundle_manifest_and_report_in_current_directory() {
 }
 
 #[test]
+fn pack_writes_outputs_to_requested_directory() {
+    let temp = tempdir().expect("temporary directory");
+    let root = temp.path();
+    let source = root.join("source");
+    let output = root.join("dist");
+
+    fs::create_dir_all(source.join("docs")).expect("docs directory");
+    fs::write(
+        source.join("docs/rust.md"),
+        "# Ownership\nRust ownership and borrowing belong in the selected context.\n",
+    )
+    .expect("markdown file");
+
+    Command::cargo_bin("contextforge")
+        .expect("contextforge binary")
+        .current_dir(root)
+        .args(["pack", "--source"])
+        .arg(&source)
+        .args([
+            "--goal",
+            "ownership borrowing",
+            "--budget",
+            "120",
+            "--output-dir",
+        ])
+        .arg(&output)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("dist"));
+
+    assert!(output.join("context-bundle.md").exists());
+    assert!(output.join("context-manifest.json").exists());
+    assert!(output.join("context-report.md").exists());
+    assert!(!root.join("context-bundle.md").exists());
+}
+
+#[test]
+fn pack_report_includes_selection_statistics() {
+    let temp = tempdir().expect("temporary directory");
+    let root = temp.path();
+    let source = root.join("source");
+
+    fs::create_dir_all(source.join("docs")).expect("docs directory");
+    fs::write(
+        source.join("docs/rust.md"),
+        "# Ownership\nRust ownership and borrowing belong in the selected context.\n",
+    )
+    .expect("markdown file");
+    fs::write(
+        source.join(".env.sample"),
+        "SERVICE_API_KEY=demo-sensitive-value-123456\n",
+    )
+    .expect("sample env file");
+
+    Command::cargo_bin("contextforge")
+        .expect("contextforge binary")
+        .current_dir(root)
+        .args(["pack", "--source"])
+        .arg(&source)
+        .args(["--goal", "ownership borrowing", "--budget", "120"])
+        .assert()
+        .success();
+
+    let report = fs::read_to_string(root.join("context-report.md")).expect("report");
+    let manifest = fs::read_to_string(root.join("context-manifest.json")).expect("manifest");
+
+    assert!(report.contains("Selected chunk types"));
+    assert!(report.contains("markdown section: 1"));
+    assert!(report.contains("Privacy severity counts"));
+    assert!(manifest.contains("\"selected_chunk_types\""));
+    assert!(manifest.contains("\"privacy_severity_counts\""));
+}
+
+#[test]
 fn pack_manifest_explains_ranking_and_budget_decisions() {
     let temp = tempdir().expect("temporary directory");
     let root = temp.path();

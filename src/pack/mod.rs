@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -7,10 +7,11 @@ use std::{
 use serde::Serialize;
 
 use crate::{
-    audit::{audit_directory, PrivacyFinding, Severity},
+    audit::{audit_directory_with_options, PrivacyFinding, Severity},
     budget::{BudgetExclusion, BudgetPlanner, BudgetPolicy},
     chunk::ChunkKind,
-    rank::{rank_directory, RankedChunk, ScoreBreakdown},
+    config::OutputConfigValues,
+    rank::{RankedChunk, ScoreBreakdown},
     ContextForgeError, Result,
 };
 
@@ -18,10 +19,39 @@ pub const BUNDLE_FILE: &str = "context-bundle.md";
 pub const MANIFEST_FILE: &str = "context-manifest.json";
 pub const REPORT_FILE: &str = "context-report.md";
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PackOptions {
     pub redact: bool,
     pub fail_on: Option<Severity>,
+    pub scan_options: crate::scanner::ScanOptions,
+    pub file_names: PackFileNames,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackFileNames {
+    pub bundle: String,
+    pub manifest: String,
+    pub report: String,
+}
+
+impl Default for PackFileNames {
+    fn default() -> Self {
+        Self {
+            bundle: BUNDLE_FILE.to_string(),
+            manifest: MANIFEST_FILE.to_string(),
+            report: REPORT_FILE.to_string(),
+        }
+    }
+}
+
+impl From<OutputConfigValues> for PackFileNames {
+    fn from(value: OutputConfigValues) -> Self {
+        Self {
+            bundle: value.bundle,
+            manifest: value.manifest,
+            report: value.report,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +95,9 @@ struct PackManifest<'a> {
     candidate_chunks: usize,
     redaction_enabled: bool,
     redacted: bool,
+    selected_chunk_types: BTreeMap<String, usize>,
+    privacy_severity_counts: BTreeMap<String, usize>,
+    privacy_kind_counts: BTreeMap<String, usize>,
     selected_chunks: &'a [PackedChunk],
     excluded_chunks: &'a [BudgetExclusion],
     privacy_findings: Vec<ManifestPrivacyFinding>,
@@ -89,9 +122,17 @@ struct RenderContext<'a> {
     candidate_count: usize,
     redaction_enabled: bool,
     redacted: bool,
+    statistics: PackStatistics,
     chunks: &'a [PackedChunk],
     excluded_chunks: &'a [BudgetExclusion],
     findings: &'a [PrivacyFinding],
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+struct PackStatistics {
+    selected_chunk_types: BTreeMap<String, usize>,
+    privacy_severity_counts: BTreeMap<String, usize>,
+    privacy_kind_counts: BTreeMap<String, usize>,
 }
 
 pub fn pack_directory(
@@ -110,11 +151,12 @@ pub fn pack_directory_with_options(
     output_dir: &Path,
     options: PackOptions,
 ) -> Result<PackResult> {
-    let ranked_chunks = rank_directory(source, goal)?;
+    let ranked_chunks =
+        crate::rank::rank_directory_with_options(source, goal, &options.scan_options)?;
     let candidate_count = ranked_chunks.len();
     let budget_policy = BudgetPolicy::new(budget);
     let budget_plan = BudgetPlanner::new(budget_policy).select(ranked_chunks);
-    let privacy_findings = audit_directory(source)?;
+    let privacy_findings = audit_directory_with_options(source, &options.scan_options)?;
     validate_privacy_gate(&privacy_findings, options.fail_on)?;
 
     let used_tokens = budget_plan.used_tokens;
@@ -127,15 +169,16 @@ pub fn pack_directory_with_options(
     let redaction_enabled = options.redact;
     let redacted = selected_chunks.iter().any(|chunk| chunk.redacted);
     let excluded_chunks = budget_plan.excluded;
+    let statistics = build_statistics(&selected_chunks, &privacy_findings);
 
     fs::create_dir_all(output_dir).map_err(|source| ContextForgeError::WriteOutput {
         path: output_dir.to_path_buf(),
         source,
     })?;
 
-    let bundle_path = output_dir.join(BUNDLE_FILE);
-    let manifest_path = output_dir.join(MANIFEST_FILE);
-    let report_path = output_dir.join(REPORT_FILE);
+    let bundle_path = output_dir.join(&options.file_names.bundle);
+    let manifest_path = output_dir.join(&options.file_names.manifest);
+    let report_path = output_dir.join(&options.file_names.report);
 
     {
         let render_context = RenderContext {
@@ -147,6 +190,7 @@ pub fn pack_directory_with_options(
             candidate_count,
             redaction_enabled,
             redacted,
+            statistics,
             chunks: &selected_chunks,
             excluded_chunks: &excluded_chunks,
             findings: &privacy_findings,
@@ -283,6 +327,9 @@ fn render_manifest(context: &RenderContext<'_>) -> Result<String> {
         candidate_chunks: context.candidate_count,
         redaction_enabled: context.redaction_enabled,
         redacted: context.redacted,
+        selected_chunk_types: context.statistics.selected_chunk_types.clone(),
+        privacy_severity_counts: context.statistics.privacy_severity_counts.clone(),
+        privacy_kind_counts: context.statistics.privacy_kind_counts.clone(),
         selected_chunks: context.chunks,
         excluded_chunks: context.excluded_chunks,
         privacy_findings: context
@@ -305,7 +352,7 @@ fn render_manifest(context: &RenderContext<'_>) -> Result<String> {
 
 fn render_report(context: &RenderContext<'_>) -> String {
     format!(
-        "# ContextForge Report\n\n- Goal: {goal}\n- Budget: {budget}\n- Used tokens: {used_tokens}\n- Remaining tokens: {remaining_tokens}\n- Per-file budget limit: {}\n- Candidate chunks: {candidate_count}\n- Selected chunks: {}\n- Excluded chunks: {}\n- Privacy findings: {}\n- Redaction: {}\n- Redacted chunks: {}\n",
+        "# ContextForge Report\n\n- Goal: {goal}\n- Budget: {budget}\n- Used tokens: {used_tokens}\n- Remaining tokens: {remaining_tokens}\n- Per-file budget limit: {}\n- Candidate chunks: {candidate_count}\n- Selected chunks: {}\n- Excluded chunks: {}\n- Privacy findings: {}\n- Redaction: {}\n- Redacted chunks: {}\n\n## Selected chunk types\n\n{}\n## Privacy severity counts\n\n{}\n## Privacy finding types\n\n{}",
         context.budget_policy.per_file_budget_limit(),
         context.chunks.len(),
         context.excluded_chunks.len(),
@@ -316,12 +363,52 @@ fn render_report(context: &RenderContext<'_>) -> String {
             "disabled"
         },
         context.chunks.iter().filter(|chunk| chunk.redacted).count(),
+        render_counts(&context.statistics.selected_chunk_types),
+        render_counts(&context.statistics.privacy_severity_counts),
+        render_counts(&context.statistics.privacy_kind_counts),
         goal = context.goal,
         budget = context.budget,
         used_tokens = context.used_tokens,
         remaining_tokens = context.remaining_tokens,
         candidate_count = context.candidate_count
     )
+}
+
+fn build_statistics(chunks: &[PackedChunk], findings: &[PrivacyFinding]) -> PackStatistics {
+    let mut statistics = PackStatistics::default();
+
+    for chunk in chunks {
+        *statistics
+            .selected_chunk_types
+            .entry(chunk.kind.label().to_string())
+            .or_default() += 1;
+    }
+
+    for finding in findings {
+        *statistics
+            .privacy_severity_counts
+            .entry(finding.severity.label().to_string())
+            .or_default() += 1;
+        *statistics
+            .privacy_kind_counts
+            .entry(finding.kind.label().to_string())
+            .or_default() += 1;
+    }
+
+    statistics
+}
+
+fn render_counts(counts: &BTreeMap<String, usize>) -> String {
+    if counts.is_empty() {
+        return "- none: 0\n\n".to_string();
+    }
+
+    let mut output = String::new();
+    for (label, count) in counts {
+        output.push_str(&format!("- {label}: {count}\n"));
+    }
+    output.push('\n');
+    output
 }
 
 fn write_output(path: &Path, content: &str) -> Result<()> {

@@ -7,21 +7,23 @@ use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 
 use crate::{
-    audit::{audit_directory, PrivacyFinding, Severity},
-    config::{write_default_config, DEFAULT_CONFIG_FILE},
-    pack::{
-        pack_directory_with_options, PackOptions, PackResult, BUNDLE_FILE, MANIFEST_FILE,
-        REPORT_FILE,
-    },
-    scanner::{scan_directory, FileKind, ScanOptions, ScanSummary, SkipReason},
-    search::{search_directory, SearchHit},
+    audit::{PrivacyFinding, Severity},
+    config::{load_config, write_default_config, AppConfig, DEFAULT_CONFIG_FILE},
+    metrics::{analyze_rust_project, RustFileMetrics, RustProjectMetrics},
+    pack::{pack_directory_with_options, PackFileNames, PackOptions, PackResult},
+    scanner::{scan_directory, FileKind, ScanSummary, SkipReason},
+    search::{search_directory_with_options, SearchHit},
     ContextForgeError, Result,
 };
 
 #[derive(Debug, Parser)]
 #[command(name = "contextforge")]
-#[command(about = "Compile local project context into auditable AI-ready bundles")]
+#[command(about = "Compile local project files into auditable context bundles")]
 pub struct Cli {
+    /// Optional configuration file. Defaults to contextforge.toml in the current directory when present.
+    #[arg(long, global = true)]
+    config: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -59,6 +61,17 @@ enum Commands {
         format: AuditFormat,
     },
 
+    /// Analyze Rust source metrics and course requirement signals.
+    Metrics {
+        /// Directory to analyze.
+        #[arg(long)]
+        source: PathBuf,
+
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = MetricsFormat::Text)]
+        format: MetricsFormat,
+    },
+
     /// Generate a context bundle, manifest, and report.
     Pack {
         /// Directory to pack.
@@ -73,6 +86,10 @@ enum Commands {
         #[arg(long)]
         budget: usize,
 
+        /// Directory where bundle, manifest, and report are written.
+        #[arg(long, default_value = ".")]
+        output_dir: PathBuf,
+
         /// Replace selected sensitive lines with redaction markers.
         #[arg(long)]
         redact: bool,
@@ -85,6 +102,12 @@ enum Commands {
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum AuditFormat {
+    Text,
+    Json,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum MetricsFormat {
     Text,
     Json,
 }
@@ -129,16 +152,38 @@ where
 
     match cli.command {
         Commands::Init => init_current_directory(),
-        Commands::Scan { source } => scan_source_directory(&source),
-        Commands::Search { source, query } => search_source_directory(&source, &query),
-        Commands::Audit { source, format } => audit_source_directory(&source, format),
+        Commands::Scan { source } => {
+            let config = load_config(cli.config.as_deref())?;
+            scan_source_directory(&source, &config)
+        }
+        Commands::Search { source, query } => {
+            let config = load_config(cli.config.as_deref())?;
+            search_source_directory(&source, &query, &config)
+        }
+        Commands::Audit { source, format } => {
+            let config = load_config(cli.config.as_deref())?;
+            audit_source_directory(&source, format, &config)
+        }
+        Commands::Metrics { source, format } => metrics_source_directory(&source, format),
         Commands::Pack {
             source,
             goal,
             budget,
+            output_dir,
             redact,
             fail_on,
-        } => pack_source_directory(&source, &goal, budget, redact, fail_on.map(Severity::from)),
+        } => {
+            let config = load_config(cli.config.as_deref())?;
+            pack_source_directory(
+                &source,
+                &goal,
+                budget,
+                &output_dir,
+                redact,
+                fail_on.map(Severity::from),
+                &config,
+            )
+        }
     }
 }
 
@@ -149,8 +194,8 @@ fn init_current_directory() -> Result<()> {
     Ok(())
 }
 
-fn scan_source_directory(source: &Path) -> Result<()> {
-    let summary = scan_directory(source, &ScanOptions::default())?;
+fn scan_source_directory(source: &Path, config: &AppConfig) -> Result<()> {
+    let summary = scan_directory(source, &config.scan_options())?;
     print_scan_summary(&summary);
     Ok(())
 }
@@ -165,6 +210,8 @@ fn print_scan_summary(summary: &ScanSummary) {
     print_kind_count(summary, FileKind::Text);
     print_kind_count(summary, FileKind::Toml);
     print_kind_count(summary, FileKind::Json);
+    print_kind_count(summary, FileKind::Pdf);
+    print_kind_count(summary, FileKind::Docx);
     print_kind_count(summary, FileKind::Other);
     println!();
     println!("Skipped:");
@@ -187,8 +234,8 @@ fn print_skip_count(summary: &ScanSummary, reason: SkipReason) {
     }
 }
 
-fn search_source_directory(source: &Path, query: &str) -> Result<()> {
-    let hits = search_directory(source, query)?;
+fn search_source_directory(source: &Path, query: &str, config: &AppConfig) -> Result<()> {
+    let hits = search_directory_with_options(source, query, &config.scan_options())?;
     print_search_hits(query, &hits);
     Ok(())
 }
@@ -219,8 +266,8 @@ fn print_search_hits(query: &str, hits: &[SearchHit]) {
     }
 }
 
-fn audit_source_directory(source: &Path, format: AuditFormat) -> Result<()> {
-    let findings = audit_directory(source)?;
+fn audit_source_directory(source: &Path, format: AuditFormat, config: &AppConfig) -> Result<()> {
+    let findings = crate::audit::audit_directory_with_options(source, &config.scan_options())?;
     match format {
         AuditFormat::Text => print_audit_findings(&findings),
         AuditFormat::Json => print_json_audit_findings(&findings)?,
@@ -267,28 +314,122 @@ fn print_json_audit_findings(findings: &[PrivacyFinding]) -> Result<()> {
     Ok(())
 }
 
+fn metrics_source_directory(source: &Path, format: MetricsFormat) -> Result<()> {
+    let metrics = analyze_rust_project(source)?;
+    match format {
+        MetricsFormat::Text => print_metrics(&metrics),
+        MetricsFormat::Json => print_json_metrics(&metrics)?,
+    }
+    Ok(())
+}
+
+fn print_metrics(metrics: &RustProjectMetrics) {
+    let summary = &metrics.summary;
+    println!("Rust project metrics");
+    println!("Source: {}", metrics.source.display());
+    println!("Rust files: {}", summary.rust_files);
+    println!("Source files: {}", summary.source_files);
+    println!("Test files: {}", summary.test_files);
+    println!("Total lines: {}", summary.total_lines);
+    println!("Effective lines: {}", summary.effective_lines);
+    println!("Effective lines in src: {}", summary.source_effective_lines);
+    println!("Effective lines in tests: {}", summary.test_effective_lines);
+    println!("Blank lines: {}", summary.blank_lines);
+    println!("Comment-only lines: {}", summary.comment_lines);
+    println!();
+    println!("Rust feature signals:");
+    println!("  Modules declared: {}", summary.modules_declared);
+    println!("  Structs: {}", summary.structs);
+    println!("  Enums: {}", summary.enums);
+    println!("  Traits: {}", summary.traits);
+    println!("  Impl blocks: {}", summary.impl_blocks);
+    println!("  Functions: {}", summary.functions);
+    println!("  Public item lines: {}", summary.public_items);
+    println!("  Async functions: {}", summary.async_functions);
+    println!("  Generic item lines: {}", summary.generic_item_lines);
+    println!("  Lifetime lines: {}", summary.lifetime_lines);
+    println!("  Result mentions: {}", summary.result_mentions);
+    println!("  Test functions: {}", summary.test_functions);
+    println!();
+    println!("Risk signals:");
+    println!("  unwrap calls: {}", summary.unwrap_calls);
+    println!("  expect calls: {}", summary.expect_calls);
+    println!("  panic macros: {}", summary.panic_macros);
+    println!("  todo/unimplemented macros: {}", summary.todo_macros);
+    println!("  unsafe mentions: {}", summary.unsafe_mentions);
+    println!();
+    println!("Requirement signals:");
+    for check in &metrics.assessment.checks {
+        println!(
+            "  [{}] {} - {}",
+            check.status.label(),
+            check.name,
+            check.detail
+        );
+    }
+    println!();
+    println!("Largest Rust files:");
+    for file in largest_files(&metrics.files, 8) {
+        println!(
+            "  {} | {} | {} effective / {} total lines | {} fn | {} tests",
+            file.path.display(),
+            file.area.label(),
+            file.effective_lines,
+            file.total_lines,
+            file.functions,
+            file.test_functions
+        );
+    }
+}
+
+fn largest_files(files: &[RustFileMetrics], limit: usize) -> Vec<&RustFileMetrics> {
+    let mut sorted = files.iter().collect::<Vec<_>>();
+    sorted.sort_by(|left, right| {
+        right
+            .effective_lines
+            .cmp(&left.effective_lines)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    sorted.into_iter().take(limit).collect()
+}
+
+fn print_json_metrics(metrics: &RustProjectMetrics) -> Result<()> {
+    let output = serde_json::to_string_pretty(metrics)
+        .map_err(|source| ContextForgeError::SerializeOutput { source })?;
+    println!("{output}");
+    Ok(())
+}
+
 fn pack_source_directory(
     source: &Path,
     goal: &str,
     budget: usize,
+    output_dir: &Path,
     redact: bool,
     fail_on: Option<Severity>,
+    config: &AppConfig,
 ) -> Result<()> {
+    let output = config.output_values();
     let result = pack_directory_with_options(
         source,
         goal,
         budget,
-        Path::new("."),
-        PackOptions { redact, fail_on },
+        output_dir,
+        PackOptions {
+            redact,
+            fail_on,
+            scan_options: config.scan_options(),
+            file_names: PackFileNames::from(output),
+        },
     )?;
     print_pack_result(&result);
     Ok(())
 }
 
 fn print_pack_result(result: &PackResult) {
-    println!("Generated {BUNDLE_FILE}");
-    println!("Generated {MANIFEST_FILE}");
-    println!("Generated {REPORT_FILE}");
+    println!("Generated {}", display_output_path(&result.bundle_path));
+    println!("Generated {}", display_output_path(&result.manifest_path));
+    println!("Generated {}", display_output_path(&result.report_path));
     println!("Selected chunks: {}", result.selected_chunks.len());
     println!("Excluded chunks: {}", result.excluded_chunks.len());
     println!("Used tokens: {}", result.used_tokens);
@@ -302,4 +443,8 @@ fn print_pack_result(result: &PackResult) {
             "disabled"
         }
     );
+}
+
+fn display_output_path(path: &Path) -> String {
+    path.strip_prefix(".").unwrap_or(path).display().to_string()
 }

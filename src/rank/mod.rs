@@ -199,12 +199,20 @@ pub struct RankedChunk {
 }
 
 pub fn rank_directory(source: &Path, query: &str) -> Result<Vec<RankedChunk>> {
+    rank_directory_with_options(source, query, &ScanOptions::default())
+}
+
+pub fn rank_directory_with_options(
+    source: &Path,
+    query: &str,
+    scan_options: &ScanOptions,
+) -> Result<Vec<RankedChunk>> {
     let terms = QueryTerms::parse(query);
     if terms.is_empty() {
         return Ok(Vec::new());
     }
 
-    let scan = scan_directory(source, &ScanOptions::default())?;
+    let scan = scan_directory(source, scan_options)?;
     let extractor = TextExtractor;
     let mut chunks = Vec::new();
 
@@ -283,6 +291,7 @@ fn file_kind_bonus(path: &Path) -> usize {
         Some("rs") => 5,
         Some("md" | "markdown") => 4,
         Some("toml" | "json") => 2,
+        Some("pdf" | "docx") => 2,
         Some("txt" | "text") => 1,
         _ => 0,
     }

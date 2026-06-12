@@ -13,6 +13,8 @@ pub enum FileKind {
     Text,
     Toml,
     Json,
+    Pdf,
+    Docx,
     Other,
 }
 
@@ -36,6 +38,8 @@ impl FileKind {
             Some("txt" | "text") => Self::Text,
             Some("toml") => Self::Toml,
             Some("json") => Self::Json,
+            Some("pdf") => Self::Pdf,
+            Some("docx") => Self::Docx,
             _ => Self::Other,
         }
     }
@@ -47,8 +51,14 @@ impl FileKind {
             Self::Text => "Text",
             Self::Toml => "TOML",
             Self::Json => "JSON",
+            Self::Pdf => "PDF",
+            Self::Docx => "DOCX",
             Self::Other => "Other",
         }
+    }
+
+    fn can_be_binary_document(self) -> bool {
+        matches!(self, Self::Pdf | Self::Docx)
     }
 }
 
@@ -85,12 +95,18 @@ pub struct SkippedEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanOptions {
     pub max_file_bytes: u64,
+    pub ignored_directories: Vec<String>,
 }
 
 impl Default for ScanOptions {
     fn default() -> Self {
         Self {
             max_file_bytes: 1_048_576,
+            ignored_directories: vec![
+                ".git".to_string(),
+                "target".to_string(),
+                "node_modules".to_string(),
+            ],
         }
     }
 }
@@ -157,7 +173,7 @@ fn visit_directory(
         })?;
 
         if metadata.is_dir() {
-            if is_ignored_directory(&path) {
+            if is_ignored_directory(&path, options) {
                 summary.skipped.push(SkippedEntry {
                     path,
                     reason: SkipReason::IgnoredDirectory,
@@ -172,6 +188,7 @@ fn visit_directory(
             continue;
         }
 
+        let kind = FileKind::from_path(&path);
         if metadata.len() > options.max_file_bytes {
             summary.skipped.push(SkippedEntry {
                 path,
@@ -185,7 +202,7 @@ fn visit_directory(
             source,
         })?;
 
-        if is_binary(&content) {
+        if is_binary(&content) && !kind.can_be_binary_document() {
             summary.skipped.push(SkippedEntry {
                 path,
                 reason: SkipReason::Binary,
@@ -194,7 +211,7 @@ fn visit_directory(
         }
 
         summary.files.push(FileInfo {
-            kind: FileKind::from_path(&path),
+            kind,
             size_bytes: metadata.len(),
             path,
         });
@@ -203,11 +220,15 @@ fn visit_directory(
     Ok(())
 }
 
-fn is_ignored_directory(path: &Path) -> bool {
-    matches!(
-        path.file_name().and_then(OsStr::to_str),
-        Some(".git" | "target" | "node_modules")
-    )
+fn is_ignored_directory(path: &Path, options: &ScanOptions) -> bool {
+    let Some(name) = path.file_name().and_then(OsStr::to_str) else {
+        return false;
+    };
+
+    options
+        .ignored_directories
+        .iter()
+        .any(|ignored| ignored == name)
 }
 
 fn is_binary(content: &[u8]) -> bool {
@@ -228,13 +249,17 @@ mod tests {
         fs::write(root.join("README.md"), "# Notes\n").expect("markdown file");
         fs::write(root.join("src/main.rs"), "fn main() {}\n").expect("rust file");
         fs::write(root.join("notes.txt"), "plain notes\n").expect("text file");
+        fs::write(root.join("guide.pdf"), [0_u8, 159, 146, 150]).expect("pdf file");
+        fs::write(root.join("brief.docx"), [0_u8, 159, 146, 150]).expect("docx file");
 
         let summary = scan_directory(root, &ScanOptions::default()).expect("scan summary");
 
-        assert_eq!(summary.files.len(), 3);
+        assert_eq!(summary.files.len(), 5);
         assert_eq!(summary.count_by_kind(FileKind::Markdown), 1);
         assert_eq!(summary.count_by_kind(FileKind::Rust), 1);
         assert_eq!(summary.count_by_kind(FileKind::Text), 1);
+        assert_eq!(summary.count_by_kind(FileKind::Pdf), 1);
+        assert_eq!(summary.count_by_kind(FileKind::Docx), 1);
     }
 
     #[test]
@@ -246,7 +271,10 @@ mod tests {
         fs::write(root.join("image.bin"), [0_u8, 159, 146, 150]).expect("binary file");
         fs::write(root.join("large.txt"), "123456789").expect("large file");
 
-        let options = ScanOptions { max_file_bytes: 4 };
+        let options = ScanOptions {
+            max_file_bytes: 4,
+            ..ScanOptions::default()
+        };
         let summary = scan_directory(root, &options).expect("scan summary");
 
         assert_eq!(

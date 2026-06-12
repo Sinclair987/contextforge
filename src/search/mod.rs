@@ -2,7 +2,8 @@ use std::path::{Path, PathBuf};
 
 use crate::{
     chunk::ChunkKind,
-    rank::{rank_directory, ScoreBreakdown},
+    rank::{rank_directory_with_options, ScoreBreakdown},
+    scanner::ScanOptions,
     Result,
 };
 
@@ -21,7 +22,15 @@ pub struct SearchHit {
 }
 
 pub fn search_directory(source: &Path, query: &str) -> Result<Vec<SearchHit>> {
-    rank_directory(source, query).map(|ranked| {
+    search_directory_with_options(source, query, &ScanOptions::default())
+}
+
+pub fn search_directory_with_options(
+    source: &Path,
+    query: &str,
+    scan_options: &ScanOptions,
+) -> Result<Vec<SearchHit>> {
+    rank_directory_with_options(source, query, scan_options).map(|ranked| {
         ranked
             .into_iter()
             .map(|chunk| SearchHit {

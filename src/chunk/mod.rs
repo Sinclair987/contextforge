@@ -37,7 +37,11 @@ pub fn split_document(document: &Document) -> Vec<Chunk> {
     match document.kind {
         DocumentKind::Markdown => split_markdown_document(document),
         DocumentKind::Rust => split_rust_document(document),
-        DocumentKind::Text | DocumentKind::Toml | DocumentKind::Json => split_paragraphs(document),
+        DocumentKind::Text
+        | DocumentKind::Toml
+        | DocumentKind::Json
+        | DocumentKind::Pdf
+        | DocumentKind::Docx => split_paragraphs(document),
     }
 }
 

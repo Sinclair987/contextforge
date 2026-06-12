@@ -153,7 +153,14 @@ pub fn audit_text(path: &Path, text: &str) -> Vec<PrivacyFinding> {
 }
 
 pub fn audit_directory(source: &Path) -> Result<Vec<PrivacyFinding>> {
-    let scan = scan_directory(source, &ScanOptions::default())?;
+    audit_directory_with_options(source, &ScanOptions::default())
+}
+
+pub fn audit_directory_with_options(
+    source: &Path,
+    scan_options: &ScanOptions,
+) -> Result<Vec<PrivacyFinding>> {
+    let scan = scan_directory(source, scan_options)?;
     let extractor = TextExtractor;
     let mut findings = Vec::new();
 

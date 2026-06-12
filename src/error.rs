@@ -14,6 +14,20 @@ pub enum ContextForgeError {
         source: std::io::Error,
     },
 
+    #[error("failed to read configuration file `{path}`")]
+    ReadConfig {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("failed to parse configuration file `{path}`")]
+    ParseConfig {
+        path: PathBuf,
+        #[source]
+        source: toml::de::Error,
+    },
+
     #[error("failed to write output file `{path}`")]
     WriteOutput {
         path: PathBuf,
@@ -35,6 +49,41 @@ pub enum ContextForgeError {
 
     #[error("privacy gate failed: {count} finding(s) at or above {severity}")]
     PrivacyGateFailed { severity: String, count: usize },
+
+    #[error("failed to extract PDF text from `{path}`")]
+    ExtractPdf {
+        path: PathBuf,
+        #[source]
+        source: pdf_extract::OutputError,
+    },
+
+    #[error("failed to open DOCX archive `{path}`")]
+    OpenDocxArchive {
+        path: PathBuf,
+        #[source]
+        source: zip::result::ZipError,
+    },
+
+    #[error("failed to read DOCX document XML from `{path}`")]
+    ReadDocxEntry {
+        path: PathBuf,
+        #[source]
+        source: zip::result::ZipError,
+    },
+
+    #[error("failed to parse DOCX XML from `{path}`")]
+    ParseDocxXml {
+        path: PathBuf,
+        #[source]
+        source: quick_xml::Error,
+    },
+
+    #[error("failed to decode DOCX XML text from `{path}`")]
+    DecodeDocxXml {
+        path: PathBuf,
+        #[source]
+        source: quick_xml::encoding::EncodingError,
+    },
 
     #[error("scan source does not exist: {path}")]
     ScanSourceMissing { path: PathBuf },

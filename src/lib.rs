@@ -5,6 +5,7 @@ pub mod cli;
 pub mod config;
 pub mod error;
 pub mod extract;
+pub mod metrics;
 pub mod pack;
 pub mod rank;
 pub mod scanner;
