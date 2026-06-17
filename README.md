@@ -18,7 +18,7 @@ Implemented:
 - file type and skipped file summaries
 - text extraction for Markdown, TXT/log/config text, Rust, common code files, TOML, JSON, YAML, CSV, TSV, XML, HTML, PDF, and DOCX
 - smart chunking for Markdown sections, Rust items, common code items, table rows, and plain paragraphs with source line numbers
-- explainable deterministic ranking with text, title, path, file-name, file-kind, chunk-kind, and density signals
+- explainable deterministic ranking with corpus-aware BM25/IDF lexical scoring, query term coverage, full-query coverage bonuses, capped exact text matches, title, path, file-name, file-kind, chunk-kind, and density signals
 - budget-aware context selection with per-file budget guardrails and exclusion reasons
 - privacy risk auditing for common key, token, database URL, email, phone, private key, URL token, and instruction override patterns
 - JSON privacy audit output, severity gates, and optional selected-line redaction during packing
@@ -30,7 +30,7 @@ Implemented:
 
 Planned next:
 
-- ranking algorithm improvements and final demonstration assets
+- additional ranking evaluation fixtures and final demonstration assets
 
 ## Build
 
@@ -71,7 +71,7 @@ report = "context-report.md"
 
 The `scan` command recursively scans a source directory, skips configured ignored directories, oversized files, and unsupported binary files, then prints file type and skipped item summaries. Supported binary document formats such as PDF and DOCX are kept for extraction.
 
-The `search` command scans local files, extracts supported formats, chunks content by Markdown heading, Rust top-level item, common code item, table row group, or paragraph, scores chunks against the query, and prints ranked file path, line range, chunk type, optional title, score, preview, and score reason results. PDF and DOCX files are extracted into plain text before chunking, and HTML/XML files are reduced to readable text before ranking.
+The `search` command scans local files, extracts supported formats, chunks content by Markdown heading, Rust top-level item, common code item, table row group, or paragraph, scores chunks against the query, and prints ranked file path, line range, chunk type, optional title, score, preview, and score reason results. Ranking combines BM25/IDF lexical relevance, query term coverage, full-query coverage bonuses, capped exact text matches, path/title/file-name matches, file and chunk kind bonuses, and term density. PDF and DOCX files are extracted into plain text before chunking, and HTML/XML files are reduced to readable text before ranking.
 
 Supported plain-text and structured formats include:
 

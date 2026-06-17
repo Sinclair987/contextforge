@@ -181,7 +181,10 @@ mod tests {
             text: "ownership borrowing".to_string(),
             preview: "ownership borrowing".to_string(),
             score_breakdown: ScoreBreakdown {
+                lexical_score: score,
                 text_match_score: score,
+                term_coverage_score: 0,
+                full_coverage_score: 0,
                 path_match_score: 0,
                 title_match_score: 0,
                 file_name_match_score: 0,

@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::{Path, PathBuf},
+};
 
 use serde::Serialize;
 
@@ -40,7 +43,10 @@ impl QueryTerms {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScoringProfile {
+    pub bm25_weight: usize,
     pub text_match_weight: usize,
+    pub term_coverage_weight: usize,
+    pub full_coverage_weight: usize,
     pub path_match_weight: usize,
     pub title_match_weight: usize,
     pub file_name_match_weight: usize,
@@ -50,7 +56,10 @@ pub struct ScoringProfile {
 impl Default for ScoringProfile {
     fn default() -> Self {
         Self {
+            bm25_weight: 10,
             text_match_weight: 3,
+            term_coverage_weight: 6,
+            full_coverage_weight: 18,
             path_match_weight: 2,
             title_match_weight: 4,
             file_name_match_weight: 3,
@@ -63,24 +72,91 @@ pub trait ChunkScorer {
     fn score(&self, chunk: &Chunk, terms: &QueryTerms) -> Option<ScoreBreakdown>;
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct DefaultScorer {
+#[derive(Debug, Clone, PartialEq)]
+pub struct CorpusScorer {
     profile: ScoringProfile,
+    document_count: usize,
+    average_document_len: f64,
+    document_frequencies: BTreeMap<String, usize>,
 }
 
-impl DefaultScorer {
-    pub fn new(profile: ScoringProfile) -> Self {
-        Self { profile }
+impl CorpusScorer {
+    pub fn from_chunks(chunks: &[Chunk], profile: ScoringProfile) -> Self {
+        let mut document_frequencies = BTreeMap::<String, usize>::new();
+        let mut total_terms = 0usize;
+
+        for chunk in chunks {
+            let tokens = tokenize(&chunk.text);
+            total_terms += tokens.len();
+
+            for term in unique_terms(tokens) {
+                *document_frequencies.entry(term).or_default() += 1;
+            }
+        }
+
+        let document_count = chunks.len();
+        let average_document_len = if document_count == 0 {
+            1.0
+        } else {
+            (total_terms as f64 / document_count as f64).max(1.0)
+        };
+
+        Self {
+            profile,
+            document_count,
+            average_document_len,
+            document_frequencies,
+        }
+    }
+
+    fn idf(&self, term: &str) -> f64 {
+        let document_count = self.document_count.max(1) as f64;
+        let document_frequency = self
+            .document_frequencies
+            .get(term)
+            .copied()
+            .unwrap_or_default() as f64;
+
+        (1.0 + ((document_count - document_frequency + 0.5) / (document_frequency + 0.5))).ln()
+    }
+
+    fn bm25_score(
+        &self,
+        frequencies: &BTreeMap<String, usize>,
+        document_len: usize,
+        terms: &QueryTerms,
+    ) -> f64 {
+        const K1: f64 = 1.2;
+        const B: f64 = 0.75;
+
+        let document_len = document_len.max(1) as f64;
+        let length_normalizer = 1.0 - B + B * (document_len / self.average_document_len);
+
+        terms
+            .as_slice()
+            .iter()
+            .filter_map(|term| {
+                let term_frequency = frequencies.get(term).copied().unwrap_or_default() as f64;
+                if term_frequency == 0.0 {
+                    return None;
+                }
+
+                let numerator = term_frequency * (K1 + 1.0);
+                let denominator = term_frequency + K1 * length_normalizer;
+                Some(self.idf(term) * (numerator / denominator))
+            })
+            .sum()
     }
 }
 
-impl ChunkScorer for DefaultScorer {
+impl ChunkScorer for CorpusScorer {
     fn score(&self, chunk: &Chunk, terms: &QueryTerms) -> Option<ScoreBreakdown> {
         if terms.is_empty() {
             return None;
         }
 
-        let text = chunk.text.to_ascii_lowercase();
+        let text_tokens = tokenize(&chunk.text);
+        let text_frequencies = term_frequencies(&text_tokens);
         let path = chunk.path.to_string_lossy().to_ascii_lowercase();
         let title = chunk
             .title
@@ -93,7 +169,11 @@ impl ChunkScorer for DefaultScorer {
             .map(|name| name.to_string_lossy().to_ascii_lowercase())
             .unwrap_or_default();
 
-        let text_matches = count_matches(&text, terms.as_slice());
+        let text_matches = terms
+            .as_slice()
+            .iter()
+            .map(|term| text_frequencies.get(term).copied().unwrap_or_default())
+            .sum::<usize>();
         let path_matches = count_matches(&path, terms.as_slice());
         let title_matches = count_matches(&title, terms.as_slice());
         let file_name_matches = count_matches(&file_name, terms.as_slice());
@@ -103,14 +183,41 @@ impl ChunkScorer for DefaultScorer {
             return None;
         }
 
-        let text_match_score = text_matches * self.profile.text_match_weight;
+        let text_matched_terms = terms
+            .as_slice()
+            .iter()
+            .filter(|term| text_frequencies.contains_key(term.as_str()))
+            .count();
+        let bm25_score = self.bm25_score(&text_frequencies, text_tokens.len(), terms);
+        let lexical_score = (bm25_score * self.profile.bm25_weight as f64).round() as usize;
+        let text_match_score = text_matched_terms * self.profile.text_match_weight;
+        let covered_terms = terms
+            .as_slice()
+            .iter()
+            .filter(|term| {
+                text_frequencies.contains_key(term.as_str())
+                    || path.contains(term.as_str())
+                    || title.contains(term.as_str())
+                    || file_name.contains(term.as_str())
+            })
+            .count();
+        let term_coverage_score = covered_terms * self.profile.term_coverage_weight;
+        let full_coverage_score =
+            if terms.as_slice().len() > 1 && covered_terms == terms.as_slice().len() {
+                self.profile.full_coverage_weight
+            } else {
+                0
+            };
         let path_match_score = path_matches * self.profile.path_match_weight;
         let title_match_score = title_matches * self.profile.title_match_weight;
         let file_name_match_score = file_name_matches * self.profile.file_name_match_weight;
         let chunk_kind_score = chunk_kind_bonus(chunk.kind);
         let file_kind_score = file_kind_bonus(&chunk.path) + chunk_kind_score;
         let density_score = density_bonus(text_matches, terms.as_slice().len(), self.profile);
-        let total_score = text_match_score
+        let total_score = lexical_score
+            + text_match_score
+            + term_coverage_score
+            + full_coverage_score
             + path_match_score
             + title_match_score
             + file_name_match_score
@@ -118,11 +225,25 @@ impl ChunkScorer for DefaultScorer {
             + density_score;
 
         let mut reasons = Vec::new();
+        if lexical_score > 0 {
+            reasons.push(format!("BM25 lexical score: {lexical_score}"));
+        }
         if text_matches > 0 {
             reasons.push(format!(
-                "text matches: {text_matches} x {}",
+                "exact text matches: {text_matches}, unique terms {text_matched_terms}/{} x {}",
+                terms.as_slice().len(),
                 self.profile.text_match_weight
             ));
+        }
+        if term_coverage_score > 0 {
+            reasons.push(format!(
+                "term coverage: {covered_terms}/{} x {}",
+                terms.as_slice().len(),
+                self.profile.term_coverage_weight
+            ));
+        }
+        if full_coverage_score > 0 {
+            reasons.push(format!("full query coverage bonus: {full_coverage_score}"));
         }
         if path_matches > 0 {
             reasons.push(format!(
@@ -150,7 +271,10 @@ impl ChunkScorer for DefaultScorer {
         }
 
         Some(ScoreBreakdown {
+            lexical_score,
             text_match_score,
+            term_coverage_score,
+            full_coverage_score,
             path_match_score,
             title_match_score,
             file_name_match_score,
@@ -164,7 +288,10 @@ impl ChunkScorer for DefaultScorer {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ScoreBreakdown {
+    pub lexical_score: usize,
     pub text_match_score: usize,
+    pub term_coverage_score: usize,
+    pub full_coverage_score: usize,
     pub path_match_score: usize,
     pub title_match_score: usize,
     pub file_name_match_score: usize,
@@ -225,10 +352,19 @@ pub fn rank_directory_with_options(
         chunks.extend(split_document(&document));
     }
 
-    Ok(rank_chunks(chunks, &terms, &DefaultScorer::default()))
+    Ok(rank_chunks(chunks, &terms))
 }
 
-pub fn rank_chunks<S>(
+pub fn rank_chunks(
+    chunks: impl IntoIterator<Item = Chunk>,
+    terms: &QueryTerms,
+) -> Vec<RankedChunk> {
+    let chunks = chunks.into_iter().collect::<Vec<_>>();
+    let scorer = CorpusScorer::from_chunks(&chunks, ScoringProfile::default());
+    rank_chunks_with_scorer(chunks, terms, &scorer)
+}
+
+pub fn rank_chunks_with_scorer<S>(
     chunks: impl IntoIterator<Item = Chunk>,
     terms: &QueryTerms,
     scorer: &S,
@@ -271,6 +407,26 @@ where
 
 fn count_matches(text: &str, terms: &[String]) -> usize {
     terms.iter().map(|term| text.matches(term).count()).sum()
+}
+
+fn tokenize(text: &str) -> Vec<String> {
+    text.split(|ch: char| !ch.is_alphanumeric() && ch != '_')
+        .map(str::trim)
+        .filter(|term| !term.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect()
+}
+
+fn unique_terms(tokens: Vec<String>) -> BTreeSet<String> {
+    tokens.into_iter().collect()
+}
+
+fn term_frequencies(tokens: &[String]) -> BTreeMap<String, usize> {
+    let mut frequencies = BTreeMap::new();
+    for token in tokens {
+        *frequencies.entry(token.clone()).or_default() += 1;
+    }
+    frequencies
 }
 
 fn density_bonus(text_matches: usize, term_count: usize, profile: ScoringProfile) -> usize {
@@ -352,7 +508,7 @@ mod tests {
             },
         ];
 
-        let ranked = rank_chunks(chunks, &terms, &DefaultScorer::default());
+        let ranked = rank_chunks(chunks, &terms);
 
         assert_eq!(ranked.len(), 2);
         assert!(ranked[0].path.ends_with("ownership.md"));
@@ -360,6 +516,77 @@ mod tests {
             .score_breakdown
             .reasons
             .iter()
-            .any(|reason| reason.contains("text matches")));
+            .any(|reason| reason.contains("BM25")));
+    }
+
+    #[test]
+    fn rank_chunks_prefers_focused_multi_term_match_over_repetition() {
+        let terms = QueryTerms::parse("neural budget");
+        let repeated_common_term = "budget ".repeat(40);
+        let chunks = vec![
+            Chunk {
+                path: PathBuf::from("docs/common.txt"),
+                kind: ChunkKind::Paragraph,
+                title: None,
+                start_line: 1,
+                end_line: 1,
+                text: repeated_common_term,
+                token_estimate: 40,
+            },
+            Chunk {
+                path: PathBuf::from("docs/focused.md"),
+                kind: ChunkKind::MarkdownSection,
+                title: Some("Neural budget".to_string()),
+                start_line: 1,
+                end_line: 2,
+                text: "neural budget plan".to_string(),
+                token_estimate: 4,
+            },
+        ];
+
+        let ranked = rank_chunks(chunks, &terms);
+
+        assert_eq!(ranked.len(), 2);
+        assert!(ranked[0].path.ends_with("focused.md"));
+        assert!(ranked[0]
+            .score_breakdown
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("term coverage")));
+    }
+
+    #[test]
+    fn rank_chunks_rewards_complete_query_coverage() {
+        let terms = QueryTerms::parse("ranking budget");
+        let chunks = vec![
+            Chunk {
+                path: PathBuf::from("src/budget.rs"),
+                kind: ChunkKind::RustItem,
+                title: Some("BudgetBudgetBudget".to_string()),
+                start_line: 1,
+                end_line: 3,
+                text: "budget ".repeat(20),
+                token_estimate: 20,
+            },
+            Chunk {
+                path: PathBuf::from("docs/relevance.txt"),
+                kind: ChunkKind::Paragraph,
+                title: None,
+                start_line: 1,
+                end_line: 1,
+                text: "ranking budget overview".to_string(),
+                token_estimate: 4,
+            },
+        ];
+
+        let ranked = rank_chunks(chunks, &terms);
+
+        assert_eq!(ranked.len(), 2);
+        assert!(ranked[0].path.ends_with("relevance.txt"));
+        assert!(ranked[0]
+            .score_breakdown
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("full query coverage")));
     }
 }
