@@ -94,6 +94,10 @@ enum Commands {
         #[arg(long)]
         redact: bool,
 
+        /// Preview selection and privacy checks without writing output files.
+        #[arg(long)]
+        dry_run: bool,
+
         /// Fail if the privacy audit finds this severity or higher.
         #[arg(long, value_enum)]
         fail_on: Option<CliSeverity>,
@@ -171,16 +175,20 @@ where
             budget,
             output_dir,
             redact,
+            dry_run,
             fail_on,
         } => {
             let config = load_config(cli.config.as_deref())?;
             pack_source_directory(
-                &source,
-                &goal,
-                budget,
-                &output_dir,
-                redact,
-                fail_on.map(Severity::from),
+                PackCommandOptions {
+                    source: &source,
+                    goal: &goal,
+                    budget,
+                    output_dir: &output_dir,
+                    redact,
+                    dry_run,
+                    fail_on: fail_on.map(Severity::from),
+                },
                 &config,
             )
         }
@@ -406,29 +414,36 @@ fn print_json_metrics(metrics: &RustProjectMetrics) -> Result<()> {
     Ok(())
 }
 
-fn pack_source_directory(
-    source: &Path,
-    goal: &str,
+struct PackCommandOptions<'a> {
+    source: &'a Path,
+    goal: &'a str,
     budget: usize,
-    output_dir: &Path,
+    output_dir: &'a Path,
     redact: bool,
+    dry_run: bool,
     fail_on: Option<Severity>,
-    config: &AppConfig,
-) -> Result<()> {
+}
+
+fn pack_source_directory(options: PackCommandOptions<'_>, config: &AppConfig) -> Result<()> {
     let output = config.output_values();
     let result = pack_directory_with_options(
-        source,
-        goal,
-        budget,
-        output_dir,
+        options.source,
+        options.goal,
+        options.budget,
+        options.output_dir,
         PackOptions {
-            redact,
-            fail_on,
+            redact: options.redact,
+            fail_on: options.fail_on,
             scan_options: config.scan_options(),
             file_names: PackFileNames::from(output),
+            write_outputs: !options.dry_run,
         },
     )?;
-    print_pack_result(&result);
+    if options.dry_run {
+        print_pack_dry_run_result(&result);
+    } else {
+        print_pack_result(&result);
+    }
     Ok(())
 }
 
@@ -449,6 +464,59 @@ fn print_pack_result(result: &PackResult) {
             "disabled"
         }
     );
+}
+
+fn print_pack_dry_run_result(result: &PackResult) {
+    println!("Dry run: no files written");
+    println!("Would write {}", display_output_path(&result.bundle_path));
+    println!("Would write {}", display_output_path(&result.manifest_path));
+    println!("Would write {}", display_output_path(&result.report_path));
+    println!("Selected chunks: {}", result.selected_chunks.len());
+    println!("Excluded chunks: {}", result.excluded_chunks.len());
+    println!("Used tokens: {}", result.used_tokens);
+    println!("Remaining tokens: {}", result.remaining_tokens);
+    println!(
+        "per-file budget limit: {}",
+        result.budget_policy.per_file_budget_limit()
+    );
+    println!("Privacy findings: {}", result.privacy_findings.len());
+    println!();
+    println!("Selected preview:");
+    if result.selected_chunks.is_empty() {
+        println!("  none");
+    } else {
+        for chunk in result.selected_chunks.iter().take(5) {
+            println!(
+                "  {}: lines {}-{} | {} | score {} | tokens {}",
+                chunk.path.display(),
+                chunk.start_line,
+                chunk.end_line,
+                chunk.kind.label(),
+                chunk.score,
+                chunk.token_estimate
+            );
+            println!("    {}", chunk.preview);
+            println!("    reason: {}", chunk.selection_reason);
+        }
+    }
+    println!();
+    println!("Excluded preview:");
+    if result.excluded_chunks.is_empty() {
+        println!("  none");
+    } else {
+        for chunk in result.excluded_chunks.iter().take(5) {
+            println!(
+                "  {}: lines {}-{} | score {} | tokens {}",
+                chunk.path.display(),
+                chunk.start_line,
+                chunk.end_line,
+                chunk.score,
+                chunk.token_estimate
+            );
+            println!("    {}", chunk.preview);
+            println!("    reason: {}", chunk.reason);
+        }
+    }
 }
 
 fn display_output_path(path: &Path) -> String {

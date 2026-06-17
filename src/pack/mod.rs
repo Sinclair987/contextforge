@@ -19,12 +19,25 @@ pub const BUNDLE_FILE: &str = "context-bundle.md";
 pub const MANIFEST_FILE: &str = "context-manifest.json";
 pub const REPORT_FILE: &str = "context-report.md";
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackOptions {
     pub redact: bool,
     pub fail_on: Option<Severity>,
     pub scan_options: crate::scanner::ScanOptions,
     pub file_names: PackFileNames,
+    pub write_outputs: bool,
+}
+
+impl Default for PackOptions {
+    fn default() -> Self {
+        Self {
+            redact: false,
+            fail_on: None,
+            scan_options: crate::scanner::ScanOptions::default(),
+            file_names: PackFileNames::default(),
+            write_outputs: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,16 +184,16 @@ pub fn pack_directory_with_options(
     let excluded_chunks = budget_plan.excluded;
     let statistics = build_statistics(&selected_chunks, &privacy_findings);
 
-    fs::create_dir_all(output_dir).map_err(|source| ContextForgeError::WriteOutput {
-        path: output_dir.to_path_buf(),
-        source,
-    })?;
-
     let bundle_path = output_dir.join(&options.file_names.bundle);
     let manifest_path = output_dir.join(&options.file_names.manifest);
     let report_path = output_dir.join(&options.file_names.report);
 
-    {
+    if options.write_outputs {
+        fs::create_dir_all(output_dir).map_err(|source| ContextForgeError::WriteOutput {
+            path: output_dir.to_path_buf(),
+            source,
+        })?;
+
         let render_context = RenderContext {
             goal,
             budget,

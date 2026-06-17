@@ -296,7 +296,7 @@ mod tests {
         let path = Path::new(".env.sample");
         let findings = audit_text(
             path,
-            "SERVICE_API_KEY=demo-sensitive-value-123456\nCONTACT_EMAIL=support@example.invalid\nDATABASE_URL=postgres://demo:demo-pass@example.invalid/app\n",
+            "SERVICE_API_KEY=test-key\nCONTACT_EMAIL=support@example.invalid\nDATABASE_URL=postgres://demo:demo-pass@example.invalid/app\n",
         );
 
         assert_eq!(findings.len(), 3);
@@ -333,7 +333,7 @@ mod tests {
         let temp = tempdir().expect("temporary directory");
         fs::write(
             temp.path().join(".env.sample"),
-            "SERVICE_API_KEY=demo-sensitive-value-123456\n",
+            "SERVICE_API_KEY=test-key\n",
         )
         .expect("sample env file");
 

@@ -15,11 +15,7 @@ fn pack_generates_bundle_manifest_and_report_in_current_directory() {
         "# Ownership\nRust ownership and borrowing help explain safe memory management. This context also covers move semantics, references, lifetimes, aliasing rules, compiler checks, and stable-anchor-after-preview-limit.\n",
     )
     .expect("markdown file");
-    fs::write(
-        source.join(".env.sample"),
-        "SERVICE_API_KEY=demo-sensitive-value-123456\n",
-    )
-    .expect("sample env file");
+    fs::write(source.join(".env.sample"), "SERVICE_API_KEY=test-key\n").expect("sample env file");
     fs::write(source.join("notes.txt"), "unrelated grocery list\n").expect("text file");
 
     Command::cargo_bin("contextforge")
@@ -98,11 +94,7 @@ fn pack_report_includes_selection_statistics() {
         "# Ownership\nRust ownership and borrowing belong in the selected context.\n",
     )
     .expect("markdown file");
-    fs::write(
-        source.join(".env.sample"),
-        "SERVICE_API_KEY=demo-sensitive-value-123456\n",
-    )
-    .expect("sample env file");
+    fs::write(source.join(".env.sample"), "SERVICE_API_KEY=test-key\n").expect("sample env file");
 
     Command::cargo_bin("contextforge")
         .expect("contextforge binary")
@@ -164,6 +156,49 @@ fn pack_manifest_explains_ranking_and_budget_decisions() {
 }
 
 #[test]
+fn pack_dry_run_previews_selection_without_writing_outputs() {
+    let temp = tempdir().expect("temporary directory");
+    let root = temp.path();
+    let source = root.join("source");
+
+    fs::create_dir_all(source.join("docs")).expect("docs directory");
+    fs::write(
+        source.join("docs/ownership.md"),
+        "ownership borrowing ownership borrowing selected context paragraph\n\nownership borrowing ownership borrowing another paragraph that should hit budget limits\n",
+    )
+    .expect("ownership markdown");
+    fs::write(
+        source.join("docs/lifetime.md"),
+        "ownership borrowing lifetime note from a second file\n",
+    )
+    .expect("lifetime markdown");
+
+    Command::cargo_bin("contextforge")
+        .expect("contextforge binary")
+        .current_dir(root)
+        .args(["pack", "--source"])
+        .arg(&source)
+        .args([
+            "--goal",
+            "ownership borrowing",
+            "--budget",
+            "70",
+            "--dry-run",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Dry run: no files written"))
+        .stdout(predicate::str::contains("Selected preview:"))
+        .stdout(predicate::str::contains("Excluded preview:"))
+        .stdout(predicate::str::contains("score"))
+        .stdout(predicate::str::contains("per-file budget limit"));
+
+    assert!(!root.join("context-bundle.md").exists());
+    assert!(!root.join("context-manifest.json").exists());
+    assert!(!root.join("context-report.md").exists());
+}
+
+#[test]
 fn pack_redacts_selected_sensitive_lines_when_requested() {
     let temp = tempdir().expect("temporary directory");
     let root = temp.path();
@@ -172,7 +207,7 @@ fn pack_redacts_selected_sensitive_lines_when_requested() {
     fs::create_dir_all(&source).expect("source directory");
     fs::write(
         source.join("notes.md"),
-        "# Deploy\nownership borrowing release note\nSERVICE_API_KEY=demo-sensitive-value-123456\n",
+        "# Deploy\nownership borrowing release note\nSERVICE_API_KEY=test-key\n",
     )
     .expect("notes file");
 
@@ -196,7 +231,7 @@ fn pack_redacts_selected_sensitive_lines_when_requested() {
     let manifest = fs::read_to_string(root.join("context-manifest.json")).expect("manifest");
 
     assert!(bundle.contains("[REDACTED: API key]"));
-    assert!(!bundle.contains("demo-sensitive-value-123456"));
+    assert!(!bundle.contains("test-key"));
     assert!(manifest.contains("\"redacted\": true"));
 }
 
@@ -209,7 +244,7 @@ fn pack_can_fail_on_configured_privacy_severity() {
     fs::create_dir_all(&source).expect("source directory");
     fs::write(
         source.join("notes.md"),
-        "# Deploy\nownership borrowing release note\nSERVICE_API_KEY=demo-sensitive-value-123456\n",
+        "# Deploy\nownership borrowing release note\nSERVICE_API_KEY=test-key\n",
     )
     .expect("notes file");
 
