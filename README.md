@@ -16,8 +16,8 @@ Implemented:
 - automatic `contextforge.toml` loading, with optional global `--config <path>`
 - recursive directory scanning with default ignores
 - file type and skipped file summaries
-- text extraction for Markdown, TXT, Rust, TOML, JSON, PDF, and DOCX
-- smart chunking for Markdown sections, Rust items, and plain paragraphs with source line numbers
+- text extraction for Markdown, TXT/log/config text, Rust, common code files, TOML, JSON, YAML, CSV, TSV, XML, HTML, PDF, and DOCX
+- smart chunking for Markdown sections, Rust items, common code items, table rows, and plain paragraphs with source line numbers
 - explainable deterministic ranking with text, title, path, file-name, file-kind, chunk-kind, and density signals
 - budget-aware context selection with per-file budget guardrails and exclusion reasons
 - privacy risk auditing for common key, token, database URL, email, phone, private key, URL token, and instruction override patterns
@@ -71,7 +71,14 @@ report = "context-report.md"
 
 The `scan` command recursively scans a source directory, skips configured ignored directories, oversized files, and unsupported binary files, then prints file type and skipped item summaries. Supported binary document formats such as PDF and DOCX are kept for extraction.
 
-The `search` command scans local files, extracts supported formats, chunks content by Markdown heading, Rust top-level item, or paragraph, scores chunks against the query, and prints ranked file path, line range, chunk type, optional title, score, preview, and score reason results. PDF and DOCX files are extracted into plain text before chunking.
+The `search` command scans local files, extracts supported formats, chunks content by Markdown heading, Rust top-level item, common code item, table row group, or paragraph, scores chunks against the query, and prints ranked file path, line range, chunk type, optional title, score, preview, and score reason results. PDF and DOCX files are extracted into plain text before chunking, and HTML/XML files are reduced to readable text before ranking.
+
+Supported plain-text and structured formats include:
+
+- Documents and notes: `.md`, `.markdown`, `.txt`, `.text`, `.log`, `.out`, `.err`
+- Config/data: `.toml`, `.json`, `.yaml`, `.yml`, `.csv`, `.tsv`, `.xml`, `.xsd`, `.svg`, `.html`, `.htm`, `.ini`, `.cfg`, `.conf`, `.properties`, `.env*`
+- Code: `.rs`, `.py`, `.js`, `.jsx`, `.ts`, `.tsx`, `.java`, `.c`, `.h`, `.cc`, `.cpp`, `.cxx`, `.hpp`, `.cs`, `.go`, `.rb`, `.php`, `.swift`, `.kt`, `.kts`, `.scala`, `.sh`, `.bash`, `.zsh`, `.ps1`, `.sql`, `.lua`, `.r`, `.m`, `.mm`, `.dart`, `.ex`, `.exs`, `.clj`, `.cljs`, `.fs`, `.fsx`, `.vb`, `.gradle`, plus common files such as `Dockerfile`, `Makefile`, `Justfile`, `Gemfile`, and `Jenkinsfile`
+- Binary document extraction: `.pdf`, `.docx`
 
 The `audit` command scans extracted text for common privacy risk patterns and prints severity, finding type, file path, line number, and a short evidence label. Use `--format json` for machine-readable audit results.
 

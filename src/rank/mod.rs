@@ -290,9 +290,16 @@ fn file_kind_bonus(path: &Path) -> usize {
     {
         Some("rs") => 5,
         Some("md" | "markdown") => 4,
-        Some("toml" | "json") => 2,
+        Some(
+            "py" | "js" | "jsx" | "ts" | "tsx" | "java" | "c" | "h" | "cc" | "cpp" | "cxx" | "hpp"
+            | "cs" | "go" | "rb" | "php" | "swift" | "kt" | "kts" | "scala" | "sh" | "bash" | "zsh"
+            | "ps1" | "sql" | "lua" | "r" | "m" | "mm" | "dart" | "ex" | "exs" | "clj" | "cljs"
+            | "fs" | "fsx" | "vb" | "gradle",
+        ) => 4,
+        Some("toml" | "json" | "yaml" | "yml" | "xml" | "html" | "htm") => 2,
+        Some("csv" | "tsv") => 2,
         Some("pdf" | "docx") => 2,
-        Some("txt" | "text") => 1,
+        Some("txt" | "text" | "log" | "ini" | "cfg" | "conf" | "properties") => 1,
         _ => 0,
     }
 }
@@ -301,6 +308,8 @@ fn chunk_kind_bonus(kind: ChunkKind) -> usize {
     match kind {
         ChunkKind::MarkdownSection => 3,
         ChunkKind::RustItem => 4,
+        ChunkKind::CodeItem => 4,
+        ChunkKind::TableRows => 2,
         ChunkKind::Paragraph => 0,
     }
 }

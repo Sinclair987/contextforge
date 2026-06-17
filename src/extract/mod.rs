@@ -16,9 +16,15 @@ use crate::{
 pub enum DocumentKind {
     Markdown,
     Rust,
+    Code,
     Text,
     Toml,
     Json,
+    Yaml,
+    Csv,
+    Tsv,
+    Xml,
+    Html,
     Pdf,
     Docx,
 }
@@ -53,9 +59,17 @@ impl Extractor for TextExtractor {
         let text = match kind {
             DocumentKind::Markdown
             | DocumentKind::Rust
+            | DocumentKind::Code
             | DocumentKind::Text
             | DocumentKind::Toml
-            | DocumentKind::Json => read_utf8_text(&file.path)?,
+            | DocumentKind::Json
+            | DocumentKind::Yaml
+            | DocumentKind::Csv
+            | DocumentKind::Tsv => read_utf8_text(&file.path)?,
+            DocumentKind::Xml | DocumentKind::Html => {
+                let text = read_utf8_text(&file.path)?;
+                extract_markup_text(&text)
+            }
             DocumentKind::Pdf => extract_pdf_text(&file.path)?,
             DocumentKind::Docx => extract_docx_text(&file.path)?,
         };
@@ -186,20 +200,153 @@ fn normalize_extracted_document_text(text: &str) -> String {
         lines.push(collapsed);
     }
 
-    lines.join("\n")
+    let first_content = lines
+        .iter()
+        .position(|line| !line.is_empty())
+        .unwrap_or(lines.len());
+    let last_content = lines
+        .iter()
+        .rposition(|line| !line.is_empty())
+        .map(|index| index + 1)
+        .unwrap_or(first_content);
+
+    lines[first_content..last_content].join("\n")
 }
 
 fn collapse_line_whitespace(line: &str) -> String {
     line.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+fn extract_markup_text(text: &str) -> String {
+    let mut output = String::new();
+    let mut chars = text.chars().peekable();
+    let mut skip_tag: Option<String> = None;
+
+    while let Some(character) = chars.next() {
+        if character != '<' {
+            if skip_tag.is_none() {
+                output.push(character);
+            }
+            continue;
+        }
+
+        let tag = read_markup_tag(&mut chars);
+        let tag_name = markup_tag_name(&tag);
+        if let Some(skipped) = skip_tag.as_deref() {
+            if tag.starts_with('/') && tag_name == skipped {
+                skip_tag = None;
+                push_markup_break(&mut output);
+            }
+            continue;
+        }
+
+        if matches!(tag_name.as_str(), "script" | "style") && !tag.starts_with('/') {
+            skip_tag = Some(tag_name);
+            continue;
+        }
+
+        if is_block_markup_tag(&tag_name) || tag.starts_with('/') {
+            push_markup_break(&mut output);
+        } else {
+            push_markup_space(&mut output);
+        }
+    }
+
+    normalize_extracted_document_text(&decode_markup_entities(&output))
+}
+
+fn push_markup_break(output: &mut String) {
+    if !output.ends_with('\n') {
+        output.push('\n');
+    }
+}
+
+fn push_markup_space(output: &mut String) {
+    if !output.chars().last().is_some_and(char::is_whitespace) {
+        output.push(' ');
+    }
+}
+
+fn read_markup_tag(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> String {
+    let mut tag = String::new();
+    for character in chars.by_ref() {
+        if character == '>' {
+            break;
+        }
+        tag.push(character);
+    }
+    tag.trim().to_ascii_lowercase()
+}
+
+fn markup_tag_name(tag: &str) -> String {
+    tag.trim_start_matches('/')
+        .split(|character: char| character.is_whitespace() || character == '/' || character == '>')
+        .next()
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn is_block_markup_tag(tag_name: &str) -> bool {
+    matches!(
+        tag_name,
+        "article"
+            | "aside"
+            | "blockquote"
+            | "body"
+            | "br"
+            | "dd"
+            | "div"
+            | "dl"
+            | "dt"
+            | "footer"
+            | "h1"
+            | "h2"
+            | "h3"
+            | "h4"
+            | "h5"
+            | "h6"
+            | "head"
+            | "header"
+            | "hr"
+            | "html"
+            | "li"
+            | "main"
+            | "nav"
+            | "ol"
+            | "p"
+            | "pre"
+            | "section"
+            | "table"
+            | "td"
+            | "th"
+            | "tr"
+            | "ul"
+    )
+}
+
+fn decode_markup_entities(text: &str) -> String {
+    text.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&apos;", "'")
+        .replace("&nbsp;", " ")
+}
+
 fn document_kind(kind: FileKind) -> Option<DocumentKind> {
     match kind {
         FileKind::Markdown => Some(DocumentKind::Markdown),
         FileKind::Rust => Some(DocumentKind::Rust),
+        FileKind::Code => Some(DocumentKind::Code),
         FileKind::Text => Some(DocumentKind::Text),
         FileKind::Toml => Some(DocumentKind::Toml),
         FileKind::Json => Some(DocumentKind::Json),
+        FileKind::Yaml => Some(DocumentKind::Yaml),
+        FileKind::Csv => Some(DocumentKind::Csv),
+        FileKind::Tsv => Some(DocumentKind::Tsv),
+        FileKind::Xml => Some(DocumentKind::Xml),
+        FileKind::Html => Some(DocumentKind::Html),
         FileKind::Pdf => Some(DocumentKind::Pdf),
         FileKind::Docx => Some(DocumentKind::Docx),
         FileKind::Other => None,
@@ -230,6 +377,27 @@ mod tests {
         assert_eq!(document.kind, DocumentKind::Markdown);
         assert_eq!(document.path, path);
         assert!(document.text.contains("Borrowing notes"));
+    }
+
+    #[test]
+    fn text_extractor_strips_html_markup_to_readable_text() {
+        let temp = tempdir().expect("temporary directory");
+        let path = temp.path().join("index.html");
+        fs::write(
+            &path,
+            "<html><body><h1>Ownership</h1><p>Borrowing &amp; lifetimes</p></body></html>",
+        )
+        .expect("html file");
+        let file = FileInfo {
+            path: path.clone(),
+            size_bytes: 80,
+            kind: FileKind::Html,
+        };
+
+        let document = TextExtractor.extract(&file).expect("document");
+
+        assert_eq!(document.kind, DocumentKind::Html);
+        assert_eq!(document.text, "Ownership\nBorrowing & lifetimes");
     }
 
     #[test]

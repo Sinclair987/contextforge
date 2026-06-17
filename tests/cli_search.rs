@@ -57,6 +57,48 @@ fn search_can_read_pdf_and_docx_documents() {
         .stdout(predicate::str::contains("DOCX notes"));
 }
 
+#[test]
+fn search_can_read_common_data_markup_and_code_formats() {
+    let temp = tempdir().expect("temporary directory");
+    let root = temp.path();
+
+    fs::create_dir_all(root.join("scripts")).expect("scripts directory");
+    fs::write(
+        root.join("settings.yaml"),
+        "feature_budget:\n  description: ranking budget yaml notes\n",
+    )
+    .expect("yaml file");
+    fs::write(
+        root.join("data.csv"),
+        "name,description\ncontextforge,ranking budget csv notes\n",
+    )
+    .expect("csv file");
+    fs::write(
+        root.join("page.html"),
+        "<main><h1>Guide</h1><p>ranking budget html notes</p></main>",
+    )
+    .expect("html file");
+    fs::write(
+        root.join("scripts/build.py"),
+        "def plan_budget():\n    return 'ranking budget python notes'\n",
+    )
+    .expect("python file");
+
+    Command::cargo_bin("contextforge")
+        .expect("contextforge binary")
+        .args(["search", "--source"])
+        .arg(root)
+        .arg("ranking budget")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("settings.yaml"))
+        .stdout(predicate::str::contains("data.csv"))
+        .stdout(predicate::str::contains("page.html"))
+        .stdout(predicate::str::contains("build.py"))
+        .stdout(predicate::str::contains("code item"))
+        .stdout(predicate::str::contains("table rows"));
+}
+
 fn write_simple_pdf(path: &Path, text: &str) {
     let stream = format!("BT /F1 24 Tf 100 700 Td ({text}) Tj ET");
     let objects = [

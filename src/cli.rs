@@ -40,7 +40,7 @@ enum Commands {
         source: PathBuf,
     },
 
-    /// Search local text files for relevant context.
+    /// Search supported local files for relevant context.
     Search {
         /// Directory to search.
         #[arg(long)]
@@ -50,7 +50,7 @@ enum Commands {
         query: String,
     },
 
-    /// Audit local text files for privacy risks.
+    /// Audit supported local files for privacy risks.
     Audit {
         /// Directory to audit.
         #[arg(long)]
@@ -207,9 +207,15 @@ fn print_scan_summary(summary: &ScanSummary) {
     println!("File types:");
     print_kind_count(summary, FileKind::Markdown);
     print_kind_count(summary, FileKind::Rust);
+    print_kind_count(summary, FileKind::Code);
     print_kind_count(summary, FileKind::Text);
     print_kind_count(summary, FileKind::Toml);
     print_kind_count(summary, FileKind::Json);
+    print_kind_count(summary, FileKind::Yaml);
+    print_kind_count(summary, FileKind::Csv);
+    print_kind_count(summary, FileKind::Tsv);
+    print_kind_count(summary, FileKind::Xml);
+    print_kind_count(summary, FileKind::Html);
     print_kind_count(summary, FileKind::Pdf);
     print_kind_count(summary, FileKind::Docx);
     print_kind_count(summary, FileKind::Other);

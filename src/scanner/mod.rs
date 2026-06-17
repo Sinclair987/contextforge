@@ -10,9 +10,15 @@ use crate::{ContextForgeError, Result};
 pub enum FileKind {
     Markdown,
     Rust,
+    Code,
     Text,
     Toml,
     Json,
+    Yaml,
+    Csv,
+    Tsv,
+    Xml,
+    Html,
     Pdf,
     Docx,
     Other,
@@ -20,11 +26,8 @@ pub enum FileKind {
 
 impl FileKind {
     fn from_path(path: &Path) -> Self {
-        if matches!(
-            path.file_name().and_then(OsStr::to_str),
-            Some(".env") | Some(".env.local") | Some(".env.sample") | Some(".env.example")
-        ) {
-            return Self::Text;
+        if let Some(kind) = file_name_kind(path) {
+            return kind;
         }
 
         match path
@@ -35,9 +38,23 @@ impl FileKind {
         {
             Some("md" | "markdown") => Self::Markdown,
             Some("rs") => Self::Rust,
-            Some("txt" | "text") => Self::Text,
+            Some(
+                "txt" | "text" | "log" | "out" | "err" | "env" | "ini" | "cfg" | "conf"
+                | "properties",
+            ) => Self::Text,
             Some("toml") => Self::Toml,
             Some("json") => Self::Json,
+            Some("yaml" | "yml") => Self::Yaml,
+            Some("csv") => Self::Csv,
+            Some("tsv") => Self::Tsv,
+            Some("xml" | "xsd" | "svg") => Self::Xml,
+            Some("html" | "htm") => Self::Html,
+            Some(
+                "py" | "js" | "jsx" | "ts" | "tsx" | "java" | "c" | "h" | "cc" | "cpp" | "cxx"
+                | "hpp" | "cs" | "go" | "rb" | "php" | "swift" | "kt" | "kts" | "scala" | "sh"
+                | "bash" | "zsh" | "ps1" | "sql" | "lua" | "r" | "m" | "mm" | "dart" | "ex" | "exs"
+                | "clj" | "cljs" | "fs" | "fsx" | "vb" | "gradle",
+            ) => Self::Code,
             Some("pdf") => Self::Pdf,
             Some("docx") => Self::Docx,
             _ => Self::Other,
@@ -48,9 +65,15 @@ impl FileKind {
         match self {
             Self::Markdown => "Markdown",
             Self::Rust => "Rust",
+            Self::Code => "Code",
             Self::Text => "Text",
             Self::Toml => "TOML",
             Self::Json => "JSON",
+            Self::Yaml => "YAML",
+            Self::Csv => "CSV",
+            Self::Tsv => "TSV",
+            Self::Xml => "XML",
+            Self::Html => "HTML",
             Self::Pdf => "PDF",
             Self::Docx => "DOCX",
             Self::Other => "Other",
@@ -60,6 +83,41 @@ impl FileKind {
     fn can_be_binary_document(self) -> bool {
         matches!(self, Self::Pdf | Self::Docx)
     }
+}
+
+fn file_name_kind(path: &Path) -> Option<FileKind> {
+    let name = path.file_name().and_then(OsStr::to_str)?;
+    let lower = name.to_ascii_lowercase();
+
+    if matches!(
+        lower.as_str(),
+        ".env"
+            | ".env.local"
+            | ".env.sample"
+            | ".env.example"
+            | ".gitignore"
+            | ".dockerignore"
+            | ".npmrc"
+            | ".editorconfig"
+            | "requirements.txt"
+            | "yarn.lock"
+            | "pnpm-lock.yaml"
+    ) {
+        return Some(FileKind::Text);
+    }
+
+    if matches!(name, "Cargo.lock") {
+        return Some(FileKind::Toml);
+    }
+
+    if matches!(
+        name,
+        "Dockerfile" | "Makefile" | "Justfile" | "Rakefile" | "Gemfile" | "Jenkinsfile"
+    ) {
+        return Some(FileKind::Code);
+    }
+
+    None
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -246,18 +304,27 @@ mod tests {
         let temp = tempdir().expect("temporary directory");
         let root = temp.path();
         fs::create_dir_all(root.join("src")).expect("source directory");
+        fs::create_dir_all(root.join("scripts")).expect("scripts directory");
         fs::write(root.join("README.md"), "# Notes\n").expect("markdown file");
         fs::write(root.join("src/main.rs"), "fn main() {}\n").expect("rust file");
+        fs::write(root.join("scripts/build.py"), "def build():\n    pass\n").expect("python file");
         fs::write(root.join("notes.txt"), "plain notes\n").expect("text file");
+        fs::write(root.join("settings.yaml"), "feature: enabled\n").expect("yaml file");
+        fs::write(root.join("data.csv"), "name,value\nalpha,1\n").expect("csv file");
+        fs::write(root.join("page.html"), "<h1>Notes</h1>\n").expect("html file");
         fs::write(root.join("guide.pdf"), [0_u8, 159, 146, 150]).expect("pdf file");
         fs::write(root.join("brief.docx"), [0_u8, 159, 146, 150]).expect("docx file");
 
         let summary = scan_directory(root, &ScanOptions::default()).expect("scan summary");
 
-        assert_eq!(summary.files.len(), 5);
+        assert_eq!(summary.files.len(), 9);
         assert_eq!(summary.count_by_kind(FileKind::Markdown), 1);
         assert_eq!(summary.count_by_kind(FileKind::Rust), 1);
+        assert_eq!(summary.count_by_kind(FileKind::Code), 1);
         assert_eq!(summary.count_by_kind(FileKind::Text), 1);
+        assert_eq!(summary.count_by_kind(FileKind::Yaml), 1);
+        assert_eq!(summary.count_by_kind(FileKind::Csv), 1);
+        assert_eq!(summary.count_by_kind(FileKind::Html), 1);
         assert_eq!(summary.count_by_kind(FileKind::Pdf), 1);
         assert_eq!(summary.count_by_kind(FileKind::Docx), 1);
     }
