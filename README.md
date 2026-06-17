@@ -18,7 +18,7 @@ Implemented:
 - file type and skipped file summaries
 - text extraction for Markdown, TXT/log/config text, Rust, common code files, TOML, JSON, YAML, CSV, TSV, XML, HTML, PDF, and DOCX
 - smart chunking for Markdown sections, Rust items, common code items, table rows, and plain paragraphs with source line numbers
-- explainable deterministic ranking with corpus-aware BM25/IDF lexical scoring, query term coverage, full-query coverage bonuses, capped exact text matches, title, path, file-name, file-kind, chunk-kind, and density signals
+- explainable deterministic ranking with corpus-aware BM25/IDF lexical scoring, CJK-aware query normalization, query term coverage, full-query coverage bonuses, capped exact text matches, title, path, file-name, file-kind, chunk-kind, and density signals
 - budget-aware context selection with per-file budget guardrails and exclusion reasons
 - dry-run packing previews that show selected and excluded chunks without writing output files
 - privacy risk auditing for common key, token, database URL, email, phone, private key, URL token, and instruction override patterns
@@ -63,7 +63,7 @@ Currently supported configuration fields:
 ```toml
 [scanner]
 max_file_bytes = 1048576
-ignore_patterns = [".git", "target", "node_modules"]
+ignore_patterns = [".git", "target", "node_modules", "dist", "build", "out", "demo-output", "venv"]
 
 [output]
 bundle = "context-bundle.md"
@@ -71,9 +71,11 @@ manifest = "context-manifest.json"
 report = "context-report.md"
 ```
 
+Configured ignored directories are added to the built-in safe defaults, which include hidden local tooling, dependency, editor, build, virtual environment, and generated-package directories.
+
 The `scan` command recursively scans a source directory, skips configured ignored directories, oversized files, and unsupported binary files, then prints file type and skipped item summaries. Supported binary document formats such as PDF and DOCX are kept for extraction.
 
-The `search` command scans local files, extracts supported formats, chunks content by Markdown heading, Rust top-level item, common code item, table row group, or paragraph, scores chunks against the query, and prints ranked file path, line range, chunk type, optional title, score, preview, and score reason results. Ranking combines BM25/IDF lexical relevance, query term coverage, full-query coverage bonuses, capped exact text matches, path/title/file-name matches, file and chunk kind bonuses, and term density. PDF and DOCX files are extracted into plain text before chunking, and HTML/XML files are reduced to readable text before ranking.
+The `search` command scans local files, extracts supported formats, chunks content by Markdown heading, Rust top-level item, common code item, table row group, or paragraph, scores chunks against the query, and prints ranked file path, line range, chunk type, optional title, score, preview, and score reason results. Ranking combines BM25/IDF lexical relevance, CJK-aware query normalization and n-gram matching, query term coverage, full-query coverage bonuses, capped exact text matches, path/title/file-name matches, file and chunk kind bonuses, and term density. PDF and DOCX files are extracted into plain text before chunking, and HTML/XML files are reduced to readable text before ranking.
 
 Supported plain-text and structured formats include:
 
@@ -86,7 +88,7 @@ The `audit` command scans extracted text for common privacy risk patterns and pr
 
 The `metrics` command analyzes Rust source files while skipping generated/build directories. It reports total and effective Rust lines, `src` and `tests` line counts, module declarations, `struct`/`enum`/`trait`/`impl` usage, function and test counts, `Result` usage, and risk signals such as `unwrap`, `expect`, `panic!`, `todo!`, and `unsafe`. Its requirement signals are intended to help judge whether the project visibly satisfies the course's engineering expectations.
 
-The `pack` command selects relevant chunks for a goal within a token budget, applies a per-file budget guardrail to keep one file from dominating the bundle, runs the privacy audit, and writes `context-bundle.md`, `context-manifest.json`, and `context-report.md` in the current directory or a directory supplied with `--output-dir`. Use `--dry-run` to preview selected and excluded chunks, score reasons, token usage, privacy finding counts, and output paths without writing files. The manifest records chunk type, title, score breakdowns, selection reasons, excluded chunks, budget usage, privacy findings, redaction status, selected chunk type counts, privacy severity counts, and privacy finding type counts. Use `--redact` to replace selected sensitive lines with `[REDACTED: <type>]`, and `--fail-on <severity>` to stop packing when findings meet or exceed the selected severity.
+The `pack` command selects relevant chunks for a goal within a token budget, applies a per-file budget guardrail to keep one file from dominating the bundle, runs the privacy audit, and writes `context-bundle.md`, `context-manifest.json`, and `context-report.md` in the current directory or a directory supplied with `--output-dir`. If the output directory is inside the scanned source tree, the current pack run ignores that output directory to avoid re-reading stale generated bundles. Use `--dry-run` to preview selected and excluded chunks, score reasons, token usage, privacy finding counts, and output paths without writing files. The manifest records chunk type, title, score breakdowns, selection reasons, excluded chunks, budget usage, privacy findings, redaction status, selected chunk type counts, privacy severity counts, and privacy finding type counts. Use `--redact` to replace selected sensitive lines with `[REDACTED: <type>]`, and `--fail-on <severity>` to stop packing when findings meet or exceed the selected severity.
 
 ## Test
 

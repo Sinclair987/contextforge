@@ -164,6 +164,11 @@ impl Default for ScanOptions {
                 ".git".to_string(),
                 "target".to_string(),
                 "node_modules".to_string(),
+                "dist".to_string(),
+                "build".to_string(),
+                "out".to_string(),
+                "demo-output".to_string(),
+                "venv".to_string(),
             ],
         }
     }
@@ -283,10 +288,18 @@ fn is_ignored_directory(path: &Path, options: &ScanOptions) -> bool {
         return false;
     };
 
+    if is_hidden_tooling_directory(name) {
+        return true;
+    }
+
     options
         .ignored_directories
         .iter()
         .any(|ignored| ignored == name)
+}
+
+fn is_hidden_tooling_directory(name: &str) -> bool {
+    name.starts_with('.') && name != ".github"
 }
 
 fn is_binary(content: &[u8]) -> bool {
@@ -350,5 +363,31 @@ mod tests {
         );
         assert_eq!(summary.count_by_skip_reason(SkipReason::Binary), 1);
         assert_eq!(summary.count_by_skip_reason(SkipReason::TooLarge), 1);
+    }
+
+    #[test]
+    fn scan_directory_ignores_local_tooling_directories_by_default() {
+        let temp = tempdir().expect("temporary directory");
+        let root = temp.path();
+        for directory in [
+            ".workspace-cache",
+            ".deps",
+            ".tool-state",
+            "out",
+            "demo-output",
+        ] {
+            fs::create_dir_all(root.join(directory)).expect("tool directory");
+            fs::write(root.join(directory).join("notes.md"), "tool notes\n").expect("tool file");
+        }
+        fs::write(root.join("README.md"), "# Project\n").expect("project file");
+
+        let summary = scan_directory(root, &ScanOptions::default()).expect("scan summary");
+
+        assert_eq!(summary.files.len(), 1);
+        assert!(summary.files[0].path.ends_with("README.md"));
+        assert_eq!(
+            summary.count_by_skip_reason(SkipReason::IgnoredDirectory),
+            5
+        );
     }
 }

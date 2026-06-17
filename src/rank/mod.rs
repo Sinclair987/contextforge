@@ -21,9 +21,8 @@ impl QueryTerms {
     pub fn parse(query: &str) -> Self {
         let mut terms = Vec::new();
 
-        for raw in query.split(|ch: char| !ch.is_alphanumeric() && ch != '_') {
-            let term = raw.trim().to_ascii_lowercase();
-            if term.is_empty() || terms.contains(&term) {
+        for term in tokenize(query) {
+            if terms.contains(&term) {
                 continue;
             }
             terms.push(term);
@@ -157,16 +156,16 @@ impl ChunkScorer for CorpusScorer {
 
         let text_tokens = tokenize(&chunk.text);
         let text_frequencies = term_frequencies(&text_tokens);
-        let path = chunk.path.to_string_lossy().to_ascii_lowercase();
+        let path = normalize_search_text(&chunk.path.to_string_lossy());
         let title = chunk
             .title
             .as_deref()
-            .map(str::to_ascii_lowercase)
+            .map(normalize_search_text)
             .unwrap_or_default();
         let file_name = chunk
             .path
             .file_name()
-            .map(|name| name.to_string_lossy().to_ascii_lowercase())
+            .map(|name| normalize_search_text(&name.to_string_lossy()))
             .unwrap_or_default();
 
         let text_matches = terms
@@ -409,12 +408,121 @@ fn count_matches(text: &str, terms: &[String]) -> usize {
     terms.iter().map(|term| text.matches(term).count()).sum()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TokenClass {
+    Cjk,
+    Word,
+}
+
 fn tokenize(text: &str) -> Vec<String> {
-    text.split(|ch: char| !ch.is_alphanumeric() && ch != '_')
-        .map(str::trim)
-        .filter(|term| !term.is_empty())
-        .map(str::to_ascii_lowercase)
-        .collect()
+    let normalized = normalize_search_text(text);
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut current_class = None;
+
+    for ch in normalized.chars() {
+        let Some(class) = token_class(ch) else {
+            flush_token(&mut tokens, &mut current, current_class);
+            current_class = None;
+            continue;
+        };
+
+        if current_class.is_some_and(|active| active != class) {
+            flush_token(&mut tokens, &mut current, current_class);
+        }
+
+        current.push(ch);
+        current_class = Some(class);
+    }
+
+    flush_token(&mut tokens, &mut current, current_class);
+    tokens
+}
+
+fn flush_token(tokens: &mut Vec<String>, current: &mut String, class: Option<TokenClass>) {
+    if current.is_empty() {
+        return;
+    }
+
+    tokens.push(std::mem::take(current));
+    if class == Some(TokenClass::Cjk) {
+        let token = tokens.last().expect("token was just pushed").clone();
+        add_cjk_ngrams(tokens, &token);
+    }
+}
+
+fn add_cjk_ngrams(tokens: &mut Vec<String>, token: &str) {
+    let chars = token.chars().collect::<Vec<_>>();
+    for size in [2, 3] {
+        if chars.len() < size {
+            continue;
+        }
+
+        for window in chars.windows(size) {
+            tokens.push(window.iter().collect());
+        }
+    }
+}
+
+fn token_class(ch: char) -> Option<TokenClass> {
+    if is_cjk(ch) {
+        return Some(TokenClass::Cjk);
+    }
+
+    (ch.is_alphanumeric() || ch == '_').then_some(TokenClass::Word)
+}
+
+fn normalize_search_text(text: &str) -> String {
+    let mut normalized = String::new();
+    for ch in text.chars() {
+        for lower in normalize_char(ch).to_lowercase() {
+            normalized.push(lower);
+        }
+    }
+    normalized
+}
+
+fn normalize_char(ch: char) -> char {
+    match ch {
+        '\u{2F00}' => '\u{4E00}',
+        '\u{2F08}' => '\u{4EBA}',
+        '\u{2F12}' => '\u{529B}',
+        '\u{2F1D}' => '\u{53E3}',
+        '\u{2F24}' => '\u{5927}',
+        '\u{2F29}' => '\u{5C0F}',
+        '\u{2F2F}' => '\u{5DE5}',
+        '\u{2F3C}' => '\u{5FC3}',
+        '\u{2F42}' => '\u{6587}',
+        '\u{2F45}' => '\u{65B9}',
+        '\u{2F47}' => '\u{65E5}',
+        '\u{2F49}' => '\u{6708}',
+        '\u{2F54}' => '\u{6C34}',
+        '\u{2F63}' => '\u{751F}',
+        '\u{2F64}' => '\u{7528}',
+        '\u{2F6C}' => '\u{76EE}',
+        '\u{2F83}' => '\u{81EA}',
+        '\u{2F8F}' => '\u{884C}',
+        '\u{2F92}' => '\u{898B}',
+        '\u{2F94}' => '\u{8A00}',
+        '\u{2F7F}' => '\u{7F51}',
+        '\u{2FB3}' => '\u{97F3}',
+        _ => ch,
+    }
+}
+
+fn is_cjk(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xF900..=0xFAFF
+            | 0x20000..=0x2A6DF
+            | 0x2A700..=0x2B73F
+            | 0x2B740..=0x2B81F
+            | 0x2B820..=0x2CEAF
+            | 0x2CEB0..=0x2EBEF
+            | 0x30000..=0x3134F
+    )
 }
 
 fn unique_terms(tokens: Vec<String>) -> BTreeSet<String> {
@@ -588,5 +696,45 @@ mod tests {
             .reasons
             .iter()
             .any(|reason| reason.contains("full query coverage")));
+    }
+
+    #[test]
+    fn rank_chunks_matches_related_chinese_goal_with_extra_character() {
+        let terms = QueryTerms::parse("\u{671F}\u{672B}\u{5927}\u{4F5C}\u{4E1A}\u{8981}\u{6C42}");
+        let chunks = vec![Chunk {
+            path: PathBuf::from("\u{671F}\u{672B}\u{4F5C}\u{4E1A}\u{8981}\u{6C42}.pdf"),
+            kind: ChunkKind::Paragraph,
+            title: None,
+            start_line: 1,
+            end_line: 2,
+            text: "\u{671F}\u{672B}\u{4F5C}\u{4E1A}\u{8981}\u{6C42}\n\u{63A8}\u{8350}\u{89C4}\u{6A21}\u{FF1A}1500\u{301C}3000 \u{884C}\u{6709}\u{6548} Rust \u{4EE3}\u{7801}".to_string(),
+            token_estimate: 20,
+        }];
+
+        let ranked = rank_chunks(chunks, &terms);
+
+        assert_eq!(ranked.len(), 1);
+        assert!(ranked[0]
+            .path
+            .ends_with("\u{671F}\u{672B}\u{4F5C}\u{4E1A}\u{8981}\u{6C42}.pdf"));
+    }
+
+    #[test]
+    fn rank_chunks_normalizes_cjk_compatibility_radicals() {
+        let terms = QueryTerms::parse("\u{5927}\u{4F5C}\u{4E1A}");
+        let chunks = vec![Chunk {
+            path: PathBuf::from("requirements.pdf"),
+            kind: ChunkKind::Paragraph,
+            title: None,
+            start_line: 1,
+            end_line: 1,
+            text: "\u{672C}\u{8BFE}\u{7A0B}\u{671F}\u{672B}\u{2F24}\u{4F5C}\u{4E1A}\u{65E8}\u{5728}\u{5E2E}\u{52A9}\u{5B66}\u{751F}\u{7EFC}\u{5408}\u{8FD0}\u{7528} Rust \u{8BED}\u{8A00}\u{77E5}\u{8BC6}".to_string(),
+            token_estimate: 20,
+        }];
+
+        let ranked = rank_chunks(chunks, &terms);
+
+        assert_eq!(ranked.len(), 1);
+        assert!(ranked[0].preview.contains("\u{671F}\u{672B}"));
     }
 }

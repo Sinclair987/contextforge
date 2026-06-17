@@ -2,17 +2,7 @@
 
 [scanner]
 max_file_bytes = 1048576
-ignore_patterns = [".git", "target", "node_modules"]
-include_extensions = ["md", "txt", "rs", "toml", "json"]
-
-[chunking]
-max_chunk_tokens = 800
-overlap_tokens = 80
-
-[ranking]
-path_weight = 1.2
-title_weight = 1.5
-privacy_penalty = 2.0
+ignore_patterns = [".git", "target", "node_modules", "dist", "build", "out", "demo-output", "venv"]
 
 [output]
 bundle = "context-bundle.md"

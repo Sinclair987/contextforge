@@ -12,6 +12,7 @@ use crate::{
     chunk::ChunkKind,
     config::OutputConfigValues,
     rank::{RankedChunk, ScoreBreakdown},
+    scanner::ScanOptions,
     ContextForgeError, Result,
 };
 
@@ -164,12 +165,12 @@ pub fn pack_directory_with_options(
     output_dir: &Path,
     options: PackOptions,
 ) -> Result<PackResult> {
-    let ranked_chunks =
-        crate::rank::rank_directory_with_options(source, goal, &options.scan_options)?;
+    let scan_options = pack_scan_options(source, output_dir, &options.scan_options);
+    let ranked_chunks = crate::rank::rank_directory_with_options(source, goal, &scan_options)?;
     let candidate_count = ranked_chunks.len();
     let budget_policy = BudgetPolicy::new(budget);
     let budget_plan = BudgetPlanner::new(budget_policy).select(ranked_chunks);
-    let privacy_findings = audit_directory_with_options(source, &options.scan_options)?;
+    let privacy_findings = audit_directory_with_options(source, &scan_options)?;
     validate_privacy_gate(&privacy_findings, options.fail_on)?;
 
     let used_tokens = budget_plan.used_tokens;
@@ -488,4 +489,78 @@ fn preview(text: &str) -> String {
     }
 
     collapsed.chars().take(MAX_PREVIEW_CHARS).collect()
+}
+
+fn pack_scan_options(source: &Path, output_dir: &Path, base_options: &ScanOptions) -> ScanOptions {
+    let mut scan_options = base_options.clone();
+    let source = absolute_path(source);
+    let output_dir = absolute_path(output_dir);
+
+    if output_dir != source && output_dir.starts_with(&source) {
+        if let Some(name) = output_dir.file_name().and_then(|name| name.to_str()) {
+            let name = name.to_string();
+            if !scan_options.ignored_directories.contains(&name) {
+                scan_options.ignored_directories.push(name);
+            }
+        }
+    }
+
+    scan_options
+}
+
+fn absolute_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+
+    std::env::current_dir()
+        .map(|current_dir| current_dir.join(path))
+        .unwrap_or_else(|_| path.to_path_buf())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn pack_directory_ignores_existing_output_directory_inside_source() {
+        let temp = tempdir().expect("temporary directory");
+        let source = temp.path().join("source");
+        let output = source.join("out");
+        fs::create_dir_all(source.join("docs")).expect("docs directory");
+        fs::create_dir_all(&output).expect("output directory");
+        fs::write(
+            source.join("docs/requirements.md"),
+            "fresh target belongs in the source document\n",
+        )
+        .expect("source document");
+        fs::write(
+            output.join("context-bundle.md"),
+            "fresh target from a previous generated bundle\n",
+        )
+        .expect("stale bundle");
+
+        let result = pack_directory_with_options(
+            &source,
+            "fresh target",
+            200,
+            &output,
+            PackOptions {
+                write_outputs: false,
+                ..PackOptions::default()
+            },
+        )
+        .expect("pack result");
+
+        assert!(!result
+            .selected_chunks
+            .iter()
+            .any(|chunk| chunk.path.ends_with("context-bundle.md")));
+        assert!(result
+            .selected_chunks
+            .iter()
+            .any(|chunk| chunk.path.ends_with("requirements.md")));
+    }
 }

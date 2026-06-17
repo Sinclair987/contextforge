@@ -10,7 +10,7 @@ pub const EXAMPLE_CONFIG: &str = r#"# ContextForge configuration
 
 [scanner]
 max_file_bytes = 1048576
-ignore_patterns = [".git", "target", "node_modules"]
+ignore_patterns = [".git", "target", "node_modules", "dist", "build", "out", "demo-output", "venv"]
 
 [output]
 bundle = "context-bundle.md"
@@ -63,7 +63,11 @@ impl AppConfig {
             options.max_file_bytes = max_file_bytes;
         }
         if let Some(ignore_patterns) = &self.scanner.ignore_patterns {
-            options.ignored_directories = ignore_patterns.clone();
+            for pattern in ignore_patterns {
+                if !options.ignored_directories.contains(pattern) {
+                    options.ignored_directories.push(pattern.clone());
+                }
+            }
         }
         options
     }
@@ -164,7 +168,7 @@ mod tests {
         let path = temp.path().join(DEFAULT_CONFIG_FILE);
         fs::write(
             &path,
-            "[scanner]\nmax_file_bytes = 64\nignore_patterns = [\"target\"]\n\n[output]\nbundle = \"bundle.md\"\n",
+            "[scanner]\nmax_file_bytes = 64\nignore_patterns = [\"target\", \"custom-cache\"]\n\n[output]\nbundle = \"bundle.md\"\n",
         )
         .expect("config file");
 
@@ -173,7 +177,20 @@ mod tests {
         let output = config.output_values();
 
         assert_eq!(scan_options.max_file_bytes, 64);
-        assert_eq!(scan_options.ignored_directories, vec!["target"]);
+        assert!(scan_options
+            .ignored_directories
+            .contains(&".git".to_string()));
+        assert!(scan_options
+            .ignored_directories
+            .contains(&"custom-cache".to_string()));
+        assert_eq!(
+            scan_options
+                .ignored_directories
+                .iter()
+                .filter(|pattern| pattern.as_str() == "target")
+                .count(),
+            1
+        );
         assert_eq!(output.bundle, "bundle.md");
         assert_eq!(output.manifest, "context-manifest.json");
     }
