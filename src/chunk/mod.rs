@@ -48,9 +48,8 @@ pub fn split_document(document: &Document) -> Vec<Chunk> {
         | DocumentKind::Json
         | DocumentKind::Yaml
         | DocumentKind::Xml
-        | DocumentKind::Html
-        | DocumentKind::Pdf
-        | DocumentKind::Docx => split_paragraphs(document),
+        | DocumentKind::Html => split_paragraphs(document),
+        DocumentKind::Pdf | DocumentKind::Docx => split_extracted_document(document),
     }
 }
 
@@ -92,6 +91,65 @@ fn split_paragraphs(document: &Document) -> Vec<Chunk> {
         previous_line,
         ChunkKind::Paragraph,
         None,
+    );
+
+    chunks
+}
+
+fn split_extracted_document(document: &Document) -> Vec<Chunk> {
+    let mut chunks = Vec::new();
+    let mut current_lines = Vec::new();
+    let mut start_line = 0;
+    let mut previous_line = 0;
+
+    for (index, line) in document.text.lines().enumerate() {
+        let line_number = index + 1;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let should_flush_current = !current_lines.is_empty()
+            && (looks_like_extracted_heading(trimmed)
+                || extracted_chunk_chars(&current_lines) + trimmed.chars().count() + 1
+                    > MAX_EXTRACTED_CHUNK_CHARS);
+        if should_flush_current {
+            push_extracted_chunk(
+                &mut chunks,
+                document,
+                &mut current_lines,
+                start_line,
+                previous_line,
+            );
+            start_line = line_number;
+        } else if current_lines.is_empty() {
+            start_line = line_number;
+        }
+
+        current_lines.push(trimmed.to_string());
+        previous_line = line_number;
+
+        if extracted_chunk_chars(&current_lines) >= TARGET_EXTRACTED_CHUNK_CHARS
+            && ends_sentence(trimmed)
+        {
+            push_extracted_chunk(
+                &mut chunks,
+                document,
+                &mut current_lines,
+                start_line,
+                previous_line,
+            );
+            start_line = 0;
+            previous_line = 0;
+        }
+    }
+
+    push_extracted_chunk(
+        &mut chunks,
+        document,
+        &mut current_lines,
+        start_line,
+        previous_line,
     );
 
     chunks
@@ -332,6 +390,110 @@ fn push_chunk(
         text,
     });
     lines.clear();
+}
+
+const TARGET_EXTRACTED_CHUNK_CHARS: usize = 700;
+const MAX_EXTRACTED_CHUNK_CHARS: usize = 1_200;
+
+fn push_extracted_chunk(
+    chunks: &mut Vec<Chunk>,
+    document: &Document,
+    lines: &mut Vec<String>,
+    start_line: usize,
+    end_line: usize,
+) {
+    let title = lines
+        .first()
+        .filter(|line| looks_like_extracted_heading(line))
+        .cloned();
+    push_chunk(
+        chunks,
+        document,
+        lines,
+        start_line,
+        end_line,
+        ChunkKind::Paragraph,
+        title,
+    );
+}
+
+fn extracted_chunk_chars(lines: &[String]) -> usize {
+    lines
+        .iter()
+        .map(|line| line.chars().count() + 1)
+        .sum::<usize>()
+}
+
+fn looks_like_extracted_heading(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.chars().count() > 120 {
+        return false;
+    }
+
+    starts_with_numbered_heading(trimmed)
+        || starts_with_chinese_numbered_heading(trimmed)
+        || markdown_heading_title(trimmed).is_some()
+}
+
+fn starts_with_numbered_heading(line: &str) -> bool {
+    let mut chars = line.chars().peekable();
+    let mut consumed_digit = false;
+
+    while chars
+        .peek()
+        .is_some_and(|ch| ch.is_ascii_digit() || is_full_width_digit(*ch))
+    {
+        consumed_digit = true;
+        chars.next();
+    }
+
+    if !consumed_digit {
+        return false;
+    }
+
+    let mut consumed_marker = false;
+    while chars
+        .peek()
+        .is_some_and(|ch| matches!(*ch, '.' | '．' | '、' | ')' | '）'))
+    {
+        consumed_marker = true;
+        chars.next();
+    }
+
+    consumed_marker && chars.any(|ch| !ch.is_whitespace())
+}
+
+fn starts_with_chinese_numbered_heading(line: &str) -> bool {
+    let mut chars = line.chars();
+    let first = chars.next();
+    let second = chars.next();
+
+    if first.is_some_and(is_chinese_heading_number)
+        && second.is_some_and(|ch| matches!(ch, '、' | '.' | '．' | ')' | '）'))
+    {
+        return true;
+    }
+
+    let lead = line.chars().take(8).collect::<String>();
+    line.starts_with('第') && (lead.contains('章') || lead.contains('节') || lead.contains("部分"))
+}
+
+fn is_chinese_heading_number(ch: char) -> bool {
+    matches!(
+        ch,
+        '一' | '二' | '三' | '四' | '五' | '六' | '七' | '八' | '九' | '十' | '零' | '〇'
+    )
+}
+
+fn is_full_width_digit(ch: char) -> bool {
+    matches!(ch as u32, 0xFF10..=0xFF19)
+}
+
+fn ends_sentence(line: &str) -> bool {
+    line.chars()
+        .rev()
+        .find(|ch| !ch.is_whitespace())
+        .is_some_and(|ch| matches!(ch, '.' | '。' | '!' | '！' | '?' | '？' | ';' | '；'))
 }
 
 fn estimate_tokens(text: &str) -> usize {
@@ -578,5 +740,37 @@ mod tests {
         assert_eq!(chunks[0].kind, ChunkKind::TableRows);
         assert_eq!(chunks[0].title.as_deref(), Some("name,description"));
         assert!(chunks[0].text.contains("ranking,budget scoring"));
+    }
+
+    #[test]
+    fn split_document_merges_short_extracted_pdf_lines_into_readable_sections() {
+        let document = Document {
+            path: PathBuf::from("docs/requirements.pdf"),
+            kind: DocumentKind::Pdf,
+            text: "1. Requirements\n\nshort ownership line one\n\nshort borrowing line two\n\nshort context line three\n\n2. Budget\n\nshort budget line one\n\nshort budget line two\n".to_string(),
+        };
+
+        let chunks = split_document(&document);
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].start_line, 1);
+        assert_eq!(chunks[0].end_line, 7);
+        assert!(chunks[0].text.contains("short borrowing line two"));
+        assert_eq!(chunks[1].start_line, 9);
+    }
+
+    #[test]
+    fn split_document_uses_extracted_document_chunking_for_docx() {
+        let document = Document {
+            path: PathBuf::from("docs/requirements.docx"),
+            kind: DocumentKind::Docx,
+            text: "Overview\n\nshort ownership line one\n\nshort borrowing line two\n\nshort context line three\n".to_string(),
+        };
+
+        let chunks = split_document(&document);
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].start_line, 1);
+        assert_eq!(chunks[0].end_line, 7);
     }
 }

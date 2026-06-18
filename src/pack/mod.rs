@@ -143,6 +143,11 @@ struct RenderContext<'a> {
     findings: &'a [PrivacyFinding],
 }
 
+struct BundleGroup<'a> {
+    path: String,
+    chunks: Vec<&'a PackedChunk>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 struct PackStatistics {
     selected_chunk_types: BTreeMap<String, usize>,
@@ -275,26 +280,43 @@ fn render_bundle(context: &RenderContext<'_>) -> String {
     if context.chunks.is_empty() {
         output.push_str("No matching context was selected.\n\n");
     } else {
-        for chunk in context.chunks {
-            let title = chunk
-                .title
-                .as_deref()
-                .map(|title| format!(" | {title}"))
-                .unwrap_or_default();
-            let path = display_source_path(context.source, &chunk.path);
-            output.push_str(&format!(
-                "### {}: lines {}-{} | {}{}\n\n{}\n\n",
-                path,
-                chunk.start_line,
-                chunk.end_line,
-                chunk.kind.label(),
-                title,
-                chunk.text
-            ));
+        for group in bundle_groups(context.source, context.chunks) {
+            output.push_str(&format!("### {}\n\n", group.path));
+            for chunk in group.chunks {
+                output.push_str(&format!(
+                    "Lines {}-{}\n\n{}\n\n",
+                    chunk.start_line, chunk.end_line, chunk.text
+                ));
+            }
         }
     }
 
     output
+}
+
+fn bundle_groups<'a>(source: &Path, chunks: &'a [PackedChunk]) -> Vec<BundleGroup<'a>> {
+    let mut groups = Vec::<BundleGroup<'a>>::new();
+
+    for chunk in chunks {
+        let path = display_source_path(source, &chunk.path);
+        if let Some(group) = groups.iter_mut().find(|group| group.path == path) {
+            group.chunks.push(chunk);
+            continue;
+        }
+
+        groups.push(BundleGroup {
+            path,
+            chunks: vec![chunk],
+        });
+    }
+
+    for group in &mut groups {
+        group
+            .chunks
+            .sort_by_key(|chunk| (chunk.start_line, chunk.end_line));
+    }
+
+    groups
 }
 
 fn render_manifest(context: &RenderContext<'_>) -> Result<String> {

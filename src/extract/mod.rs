@@ -177,11 +177,14 @@ fn normalize_extracted_document_text(text: &str) -> String {
     let canonical_newlines = text.replace("\r\n", "\n").replace('\r', "\n");
     let cleaned = canonical_newlines
         .chars()
-        .map(|character| match character {
-            '\n' => '\n',
-            '\t' => ' ',
-            character if character.is_control() => ' ',
-            character => character,
+        .map(|character| {
+            let character = crate::normalize::normalize_width_and_radicals(character);
+            match character {
+                '\n' => '\n',
+                '\t' => ' ',
+                character if character.is_control() => ' ',
+                character => character,
+            }
         })
         .collect::<String>();
 
@@ -418,5 +421,29 @@ mod tests {
         let normalized = normalize_extracted_document_text("Rust\u{1}PDF\r\nNext\tword\n\n\nTail");
 
         assert_eq!(normalized, "Rust PDF\nNext word\n\nTail");
+    }
+
+    #[test]
+    fn document_text_normalization_canonicalizes_pdf_compatibility_characters() {
+        let normalized = normalize_extracted_document_text(
+            "\u{FF32}\u{FF55}\u{FF53}\u{FF54}\n\u{4F5C}\u{4E1A}\u{2F6C}\u{6807} \u{2F50}\u{4F8B}",
+        );
+
+        assert_eq!(
+            normalized,
+            "Rust\n\u{4F5C}\u{4E1A}\u{76EE}\u{6807} \u{6BD4}\u{4F8B}"
+        );
+    }
+
+    #[test]
+    fn document_text_normalization_canonicalizes_more_pdf_radicals() {
+        let normalized = normalize_extracted_document_text(
+            "\u{2FCE}\u{52B1} \u{6EE1}\u{2F9C} \u{2EDA}\u{2FAF} \u{2F79}\u{7EDC} \u{2EC5}\u{89C6}",
+        );
+
+        assert_eq!(
+            normalized,
+            "\u{9F13}\u{52B1} \u{6EE1}\u{8DB3} \u{9875}\u{9762} \u{7F51}\u{7EDC} \u{89C1}\u{89C6}"
+        );
     }
 }

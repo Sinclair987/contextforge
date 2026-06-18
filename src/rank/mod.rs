@@ -453,7 +453,7 @@ fn flush_token(tokens: &mut Vec<String>, current: &mut String, class: Option<Tok
 
 fn add_cjk_ngrams(tokens: &mut Vec<String>, token: &str) {
     let chars = token.chars().collect::<Vec<_>>();
-    for size in [2, 3] {
+    for size in [2, 3, 4] {
         if chars.len() < size {
             continue;
         }
@@ -483,31 +483,7 @@ fn normalize_search_text(text: &str) -> String {
 }
 
 fn normalize_char(ch: char) -> char {
-    match ch {
-        '\u{2F00}' => '\u{4E00}',
-        '\u{2F08}' => '\u{4EBA}',
-        '\u{2F12}' => '\u{529B}',
-        '\u{2F1D}' => '\u{53E3}',
-        '\u{2F24}' => '\u{5927}',
-        '\u{2F29}' => '\u{5C0F}',
-        '\u{2F2F}' => '\u{5DE5}',
-        '\u{2F3C}' => '\u{5FC3}',
-        '\u{2F42}' => '\u{6587}',
-        '\u{2F45}' => '\u{65B9}',
-        '\u{2F47}' => '\u{65E5}',
-        '\u{2F49}' => '\u{6708}',
-        '\u{2F54}' => '\u{6C34}',
-        '\u{2F63}' => '\u{751F}',
-        '\u{2F64}' => '\u{7528}',
-        '\u{2F6C}' => '\u{76EE}',
-        '\u{2F83}' => '\u{81EA}',
-        '\u{2F8F}' => '\u{884C}',
-        '\u{2F92}' => '\u{898B}',
-        '\u{2F94}' => '\u{8A00}',
-        '\u{2F7F}' => '\u{7F51}',
-        '\u{2FB3}' => '\u{97F3}',
-        _ => ch,
-    }
+    crate::normalize::normalize_search_char(ch)
 }
 
 fn is_cjk(ch: char) -> bool {
@@ -736,5 +712,28 @@ mod tests {
 
         assert_eq!(ranked.len(), 1);
         assert!(ranked[0].preview.contains("\u{671F}\u{672B}"));
+    }
+
+    #[test]
+    fn rank_chunks_normalizes_full_width_ascii_and_additional_kangxi_radicals() {
+        let terms = QueryTerms::parse("Rust \u{6BD4}\u{4F8B}");
+        let chunks = vec![Chunk {
+            path: PathBuf::from("requirements.pdf"),
+            kind: ChunkKind::Paragraph,
+            title: None,
+            start_line: 1,
+            end_line: 1,
+            text: "\u{FF32}\u{FF55}\u{FF53}\u{FF54} \u{2F50}\u{4F8B} requirement".to_string(),
+            token_estimate: 10,
+        }];
+
+        let ranked = rank_chunks(chunks, &terms);
+
+        assert_eq!(ranked.len(), 1);
+        assert!(ranked[0]
+            .score_breakdown
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("full query coverage")));
     }
 }

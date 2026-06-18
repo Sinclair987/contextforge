@@ -49,6 +49,36 @@ fn pack_generates_bundle_manifest_and_report_in_current_directory() {
 }
 
 #[test]
+fn pack_bundle_groups_repeated_chunks_under_one_file_heading() {
+    let temp = tempdir().expect("temporary directory");
+    let root = temp.path();
+    let source = root.join("source");
+
+    fs::create_dir_all(source.join("docs")).expect("docs directory");
+    fs::write(
+        source.join("docs/source_alpha.md"),
+        "ownership borrowing first selected block with enough context words\n\nownership borrowing second selected block with enough context words\n",
+    )
+    .expect("markdown file");
+
+    Command::cargo_bin("contextforge")
+        .expect("contextforge binary")
+        .current_dir(root)
+        .args(["pack", "--source"])
+        .arg(&source)
+        .args(["--goal", "ownership borrowing", "--budget", "220"])
+        .assert()
+        .success();
+
+    let bundle = fs::read_to_string(root.join("context-bundle.md")).expect("bundle");
+
+    assert_eq!(bundle.matches("source_alpha.md").count(), 1);
+    assert!(bundle.contains("Lines 1-1"));
+    assert!(bundle.contains("Lines 3-3"));
+    assert!(!bundle.contains("paragraph"));
+}
+
+#[test]
 fn pack_writes_outputs_to_requested_directory() {
     let temp = tempdir().expect("temporary directory");
     let root = temp.path();

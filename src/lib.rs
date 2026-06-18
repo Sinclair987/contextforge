@@ -6,6 +6,7 @@ pub mod config;
 pub mod error;
 pub mod extract;
 pub mod metrics;
+mod normalize;
 pub mod pack;
 pub mod rank;
 pub mod scanner;
