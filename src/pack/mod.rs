@@ -129,6 +129,7 @@ struct ManifestPrivacyFinding {
 
 struct RenderContext<'a> {
     goal: &'a str,
+    source: &'a Path,
     budget: usize,
     used_tokens: usize,
     remaining_tokens: usize,
@@ -197,6 +198,7 @@ pub fn pack_directory_with_options(
 
         let render_context = RenderContext {
             goal,
+            source,
             budget,
             used_tokens,
             remaining_tokens,
@@ -268,23 +270,6 @@ fn render_bundle(context: &RenderContext<'_>) -> String {
     output.push_str("## Goal\n\n");
     output.push_str(context.goal);
     output.push_str("\n\n");
-    output.push_str("## Budget\n\n");
-    output.push_str(&format!(
-        "- Budget: {budget}\n- Used tokens: {used_tokens}\n- Remaining tokens: {remaining_tokens}\n- Per-file budget limit: {}\n- Excluded chunks: {}\n\n",
-        context.budget_policy.per_file_budget_limit(),
-        context.excluded_chunks.len(),
-        budget = context.budget,
-        used_tokens = context.used_tokens,
-        remaining_tokens = context.remaining_tokens
-    ));
-    output.push_str(&format!(
-        "- Redaction: {}\n\n",
-        if context.redaction_enabled {
-            "enabled"
-        } else {
-            "disabled"
-        }
-    ));
     output.push_str("## Selected Context\n\n");
 
     if context.chunks.is_empty() {
@@ -296,34 +281,15 @@ fn render_bundle(context: &RenderContext<'_>) -> String {
                 .as_deref()
                 .map(|title| format!(" | {title}"))
                 .unwrap_or_default();
+            let path = display_source_path(context.source, &chunk.path);
             output.push_str(&format!(
                 "### {}: lines {}-{} | {}{}\n\n{}\n\n",
-                chunk.path.display(),
+                path,
                 chunk.start_line,
                 chunk.end_line,
                 chunk.kind.label(),
                 title,
                 chunk.text
-            ));
-            output.push_str(&format!(
-                "Score: {}\n\nSelection reason: {}\n\n",
-                chunk.score, chunk.selection_reason
-            ));
-        }
-    }
-
-    output.push_str("## Privacy findings\n\n");
-    if context.findings.is_empty() {
-        output.push_str("No privacy risks found.\n");
-    } else {
-        for finding in context.findings {
-            output.push_str(&format!(
-                "- {} | {} | {}: line {} | {}\n",
-                finding.severity.label(),
-                finding.kind.label(),
-                finding.path.display(),
-                finding.line,
-                finding.evidence
             ));
         }
     }
@@ -516,6 +482,15 @@ fn absolute_path(path: &Path) -> PathBuf {
     std::env::current_dir()
         .map(|current_dir| current_dir.join(path))
         .unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn display_source_path(source: &Path, path: &Path) -> String {
+    let source = absolute_path(source);
+    let path = absolute_path(path);
+    path.strip_prefix(&source)
+        .unwrap_or(&path)
+        .display()
+        .to_string()
 }
 
 #[cfg(test)]

@@ -37,7 +37,10 @@ fn pack_generates_bundle_manifest_and_report_in_current_directory() {
     assert!(bundle.contains("ownership borrowing"));
     assert!(bundle.contains("Rust ownership and borrowing"));
     assert!(bundle.contains("stable-anchor-after-preview-limit"));
-    assert!(bundle.contains("Privacy findings"));
+    assert!(!bundle.contains("Score:"));
+    assert!(!bundle.contains("Selection reason:"));
+    assert!(!bundle.contains("Privacy findings"));
+    assert!(!bundle.contains("Budget:"));
     assert!(manifest.contains("\"used_tokens\""));
     assert!(manifest.contains("rust.md"));
     assert!(manifest.contains("API key"));

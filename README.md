@@ -25,7 +25,7 @@ Implemented:
 - JSON privacy audit output, severity gates, and optional selected-line redaction during packing
 - Rust project metrics for effective lines, module/type/test signals, risk calls, and requirement checks
 - configurable output directory and output file names
-- context bundle, JSON manifest, and Markdown report generation with selection and privacy statistics
+- lean context bundle generation for model input, plus JSON manifest and Markdown report generation with selection and privacy statistics
 - typed error handling for config creation
 - unit and integration tests
 
@@ -88,7 +88,7 @@ The `audit` command scans extracted text for common privacy risk patterns and pr
 
 The `metrics` command analyzes Rust source files while skipping generated/build directories. It reports total and effective Rust lines, `src` and `tests` line counts, module declarations, `struct`/`enum`/`trait`/`impl` usage, function and test counts, `Result` usage, and risk signals such as `unwrap`, `expect`, `panic!`, `todo!`, and `unsafe`. Its requirement signals are intended to help judge whether the project visibly satisfies the course's engineering expectations.
 
-The `pack` command selects relevant chunks for a goal within a token budget, applies a per-file budget guardrail to keep one file from dominating the bundle, runs the privacy audit, and writes `context-bundle.md`, `context-manifest.json`, and `context-report.md` in the current directory or a directory supplied with `--output-dir`. If the output directory is inside the scanned source tree, the current pack run ignores that output directory to avoid re-reading stale generated bundles. Use `--dry-run` to preview selected and excluded chunks, score reasons, token usage, privacy finding counts, and output paths without writing files. The manifest records chunk type, title, score breakdowns, selection reasons, excluded chunks, budget usage, privacy findings, redaction status, selected chunk type counts, privacy severity counts, and privacy finding type counts. Use `--redact` to replace selected sensitive lines with `[REDACTED: <type>]`, and `--fail-on <severity>` to stop packing when findings meet or exceed the selected severity.
+The `pack` command selects relevant chunks for a goal within a token budget, applies a per-file budget guardrail to keep one file from dominating the bundle, runs the privacy audit, and writes `context-bundle.md`, `context-manifest.json`, and `context-report.md` in the current directory or a directory supplied with `--output-dir`. The bundle is intentionally lean model input: goal, source labels, line ranges, and selected text only. Scores, selection reasons, budget details, excluded chunks, and privacy findings are kept in the manifest and report instead of spending bundle tokens. If an existing ContextForge output directory is inside the scanned source tree, scanning ignores it to avoid re-reading stale generated bundles. Use `--dry-run` to preview selected and excluded chunks, score reasons, token usage, privacy finding counts, and output paths without writing files. The manifest records chunk type, title, score breakdowns, selection reasons, excluded chunks, budget usage, privacy findings, redaction status, selected chunk type counts, privacy severity counts, and privacy finding type counts. Use `--redact` to replace selected sensitive lines with `[REDACTED: <type>]`, and `--fail-on <severity>` to stop packing when findings meet or exceed the selected severity.
 
 ## Test
 

@@ -6,6 +6,12 @@ use std::{
 
 use crate::{ContextForgeError, Result};
 
+const GENERATED_OUTPUT_FILES: [&str; 3] = [
+    "context-bundle.md",
+    "context-manifest.json",
+    "context-report.md",
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileKind {
     Markdown,
@@ -251,6 +257,10 @@ fn visit_directory(
             continue;
         }
 
+        if is_generated_output_file(&path) {
+            continue;
+        }
+
         let kind = FileKind::from_path(&path);
         if metadata.len() > options.max_file_bytes {
             summary.skipped.push(SkippedEntry {
@@ -292,6 +302,10 @@ fn is_ignored_directory(path: &Path, options: &ScanOptions) -> bool {
         return true;
     }
 
+    if is_contextforge_output_directory(path) {
+        return true;
+    }
+
     options
         .ignored_directories
         .iter()
@@ -300,6 +314,20 @@ fn is_ignored_directory(path: &Path, options: &ScanOptions) -> bool {
 
 fn is_hidden_tooling_directory(name: &str) -> bool {
     name.starts_with('.') && name != ".github"
+}
+
+fn is_contextforge_output_directory(path: &Path) -> bool {
+    GENERATED_OUTPUT_FILES
+        .iter()
+        .filter(|file_name| path.join(file_name).is_file())
+        .count()
+        >= 2
+}
+
+fn is_generated_output_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(OsStr::to_str)
+        .is_some_and(|name| GENERATED_OUTPUT_FILES.contains(&name))
 }
 
 fn is_binary(content: &[u8]) -> bool {

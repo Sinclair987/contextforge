@@ -99,6 +99,38 @@ fn search_can_read_common_data_markup_and_code_formats() {
         .stdout(predicate::str::contains("table rows"));
 }
 
+#[test]
+fn search_ignores_existing_contextforge_output_directories() {
+    let temp = tempdir().expect("temporary directory");
+    let root = temp.path();
+
+    fs::create_dir_all(root.join("docs")).expect("docs directory");
+    fs::create_dir_all(root.join("rust-final-pack")).expect("generated directory");
+    fs::write(
+        root.join("docs/requirements.md"),
+        "final project requirements belong in the real source document\n",
+    )
+    .expect("source document");
+    fs::write(
+        root.join("rust-final-pack/context-bundle.md"),
+        "final project requirements repeated from a stale generated bundle\n",
+    )
+    .expect("generated bundle");
+    fs::write(root.join("rust-final-pack/context-manifest.json"), "{}\n").expect("manifest");
+    fs::write(root.join("rust-final-pack/context-report.md"), "# report\n").expect("report");
+
+    Command::cargo_bin("contextforge")
+        .expect("contextforge binary")
+        .args(["search", "--source"])
+        .arg(root)
+        .arg("final project requirements")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("requirements.md"))
+        .stdout(predicate::str::contains("context-bundle.md").not())
+        .stdout(predicate::str::contains("rust-final-pack").not());
+}
+
 fn write_simple_pdf(path: &Path, text: &str) {
     let stream = format!("BT /F1 24 Tf 100 700 Td ({text}) Tj ET");
     let objects = [
