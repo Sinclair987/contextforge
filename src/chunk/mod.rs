@@ -49,7 +49,9 @@ pub fn split_document(document: &Document) -> Vec<Chunk> {
         | DocumentKind::Yaml
         | DocumentKind::Xml
         | DocumentKind::Html => split_paragraphs(document),
-        DocumentKind::Pdf | DocumentKind::Docx => split_extracted_document(document),
+        DocumentKind::Pdf | DocumentKind::Docx | DocumentKind::Epub => {
+            split_extracted_document(document)
+        }
     }
 }
 

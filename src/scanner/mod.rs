@@ -1,6 +1,7 @@
 use std::{
     ffi::OsStr,
     fs,
+    io::Read,
     path::{Path, PathBuf},
 };
 
@@ -27,6 +28,7 @@ pub enum FileKind {
     Html,
     Pdf,
     Docx,
+    Epub,
     Other,
 }
 
@@ -63,6 +65,7 @@ impl FileKind {
             ) => Self::Code,
             Some("pdf") => Self::Pdf,
             Some("docx") => Self::Docx,
+            Some("epub") => Self::Epub,
             _ => Self::Other,
         }
     }
@@ -82,12 +85,21 @@ impl FileKind {
             Self::Html => "HTML",
             Self::Pdf => "PDF",
             Self::Docx => "DOCX",
+            Self::Epub => "EPUB",
             Self::Other => "Other",
         }
     }
 
     fn can_be_binary_document(self) -> bool {
-        matches!(self, Self::Pdf | Self::Docx)
+        matches!(self, Self::Pdf | Self::Docx | Self::Epub)
+    }
+
+    fn size_limit(self, options: &ScanOptions) -> u64 {
+        if self.can_be_binary_document() {
+            options.max_document_bytes
+        } else {
+            options.max_file_bytes
+        }
     }
 }
 
@@ -161,6 +173,8 @@ pub struct SkippedEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanOptions {
     pub max_file_bytes: u64,
+    pub max_document_bytes: u64,
+    pub pdf_timeout_seconds: u64,
     pub ignored_directories: Vec<String>,
     pub included_paths: Vec<PathBuf>,
     pub excluded_paths: Vec<PathBuf>,
@@ -169,7 +183,9 @@ pub struct ScanOptions {
 impl Default for ScanOptions {
     fn default() -> Self {
         Self {
-            max_file_bytes: 1_048_576,
+            max_file_bytes: 8 * 1024 * 1024,
+            max_document_bytes: 64 * 1024 * 1024,
+            pdf_timeout_seconds: 5,
             ignored_directories: vec![
                 ".git".to_string(),
                 "target".to_string(),
@@ -291,7 +307,7 @@ fn visit_directory(
         }
 
         let kind = FileKind::from_path(&path);
-        if metadata.len() > options.max_file_bytes {
+        if metadata.len() > kind.size_limit(options) {
             summary.skipped.push(SkippedEntry {
                 path,
                 reason: SkipReason::TooLarge,
@@ -299,12 +315,7 @@ fn visit_directory(
             continue;
         }
 
-        let content = fs::read(&path).map_err(|source| ContextForgeError::ReadFile {
-            path: path.to_path_buf(),
-            source,
-        })?;
-
-        if is_binary(&content) && !kind.can_be_binary_document() {
+        if !kind.can_be_binary_document() && file_starts_with_binary_content(&path)? {
             summary.skipped.push(SkippedEntry {
                 path,
                 reason: SkipReason::Binary,
@@ -320,6 +331,23 @@ fn visit_directory(
     }
 
     Ok(())
+}
+
+fn file_starts_with_binary_content(path: &Path) -> Result<bool> {
+    const PROBE_BYTES: u64 = 8 * 1024;
+
+    let file = fs::File::open(path).map_err(|source| ContextForgeError::ReadFile {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut content = Vec::with_capacity(PROBE_BYTES as usize);
+    file.take(PROBE_BYTES)
+        .read_to_end(&mut content)
+        .map_err(|source| ContextForgeError::ReadFile {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    Ok(is_binary(&content))
 }
 
 fn should_visit_directory(relative: &Path, options: &ScanOptions) -> bool {
@@ -409,10 +437,11 @@ mod tests {
         fs::write(root.join("page.html"), "<h1>Notes</h1>\n").expect("html file");
         fs::write(root.join("guide.pdf"), [0_u8, 159, 146, 150]).expect("pdf file");
         fs::write(root.join("brief.docx"), [0_u8, 159, 146, 150]).expect("docx file");
+        fs::write(root.join("book.epub"), [0_u8, 159, 146, 150]).expect("epub file");
 
         let summary = scan_directory(root, &ScanOptions::default()).expect("scan summary");
 
-        assert_eq!(summary.files.len(), 9);
+        assert_eq!(summary.files.len(), 10);
         assert_eq!(summary.count_by_kind(FileKind::Markdown), 1);
         assert_eq!(summary.count_by_kind(FileKind::Rust), 1);
         assert_eq!(summary.count_by_kind(FileKind::Code), 1);
@@ -422,6 +451,24 @@ mod tests {
         assert_eq!(summary.count_by_kind(FileKind::Html), 1);
         assert_eq!(summary.count_by_kind(FileKind::Pdf), 1);
         assert_eq!(summary.count_by_kind(FileKind::Docx), 1);
+        assert_eq!(summary.count_by_kind(FileKind::Epub), 1);
+    }
+
+    #[test]
+    fn scan_directory_applies_a_separate_document_size_limit() {
+        let temp = tempdir().expect("temporary directory");
+        fs::write(temp.path().join("large.txt"), "123456789").expect("text file");
+        fs::write(temp.path().join("book.pdf"), [0_u8; 9]).expect("PDF file");
+        let options = ScanOptions {
+            max_file_bytes: 4,
+            max_document_bytes: 16,
+            ..ScanOptions::default()
+        };
+
+        let summary = scan_directory(temp.path(), &options).expect("scan summary");
+
+        assert_eq!(summary.count_by_kind(FileKind::Pdf), 1);
+        assert_eq!(summary.count_by_skip_reason(SkipReason::TooLarge), 1);
     }
 
     #[test]

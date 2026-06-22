@@ -15,13 +15,14 @@ fn version_flag_prints_package_version() {
 }
 
 #[test]
-fn help_does_not_list_metrics_command() {
+fn help_does_not_list_removed_or_internal_commands() {
     Command::cargo_bin("contextforge")
         .expect("contextforge binary")
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("\n  metrics ").not());
+        .stdout(predicate::str::contains("\n  metrics ").not())
+        .stdout(predicate::str::contains("__extract-pdf-worker").not());
 }
 
 #[test]

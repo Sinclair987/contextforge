@@ -58,6 +58,23 @@ fn search_can_read_pdf_and_docx_documents() {
 }
 
 #[test]
+fn search_can_read_epub_documents() {
+    let temp = tempdir().expect("temporary directory");
+    let path = temp.path().join("book.epub");
+    write_simple_epub(&path);
+
+    Command::cargo_bin("contextforge")
+        .expect("contextforge binary")
+        .args(["search", "--source"])
+        .arg(temp.path())
+        .arg("semantic orchid")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("book.epub"))
+        .stdout(predicate::str::contains("semantic orchid blooms"));
+}
+
+#[test]
 fn search_can_read_common_data_markup_and_code_formats() {
     let temp = tempdir().expect("temporary directory");
     let root = temp.path();
@@ -136,6 +153,7 @@ fn search_skips_unreadable_documents_and_keeps_valid_results() {
     let temp = tempdir().expect("temporary directory");
     let root = temp.path();
     fs::write(root.join("broken.pdf"), b"%PDF-1.4 broken document").expect("broken pdf");
+    fs::write(root.join("broken.epub"), b"not a zip archive").expect("broken EPUB");
     fs::write(
         root.join("requirements.md"),
         "course project requirements remain searchable\n",
@@ -150,8 +168,9 @@ fn search_skips_unreadable_documents_and_keeps_valid_results() {
         .assert()
         .success()
         .stdout(predicate::str::contains("requirements.md"))
-        .stdout(predicate::str::contains("Extraction warnings: 1"))
-        .stderr(predicate::str::contains("broken.pdf"));
+        .stdout(predicate::str::contains("Extraction warnings: 2"))
+        .stderr(predicate::str::contains("broken.pdf"))
+        .stderr(predicate::str::contains("broken.epub"));
 }
 
 #[test]
@@ -272,4 +291,45 @@ fn write_simple_docx(path: &Path, text: &str) {
         )
         .expect("document body");
     writer.finish().expect("finish docx");
+}
+
+fn write_simple_epub(path: &Path) {
+    let file = fs::File::create(path).expect("epub file");
+    let mut writer = ZipWriter::new(file);
+    let options = SimpleFileOptions::default();
+
+    let entries = [
+        (
+            "META-INF/container.xml",
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container" version="1.0">
+  <rootfiles><rootfile full-path="OPS/package.opf" media-type="application/oebps-package+xml"/></rootfiles>
+</container>"#,
+        ),
+        (
+            "OPS/package.opf",
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <manifest>
+    <item id="first" href="first.xhtml" media-type="application/xhtml+xml"/>
+    <item id="second" href="second.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine><itemref idref="first"/><itemref idref="second"/></spine>
+</package>"#,
+        ),
+        (
+            "OPS/first.xhtml",
+            "<html><body><h1>First</h1><p>ordinary opening chapter</p></body></html>",
+        ),
+        (
+            "OPS/second.xhtml",
+            "<html><body><h1>Second</h1><p>semantic orchid blooms here</p></body></html>",
+        ),
+    ];
+
+    for (name, content) in entries {
+        writer.start_file(name, options).expect("EPUB entry");
+        writer.write_all(content.as_bytes()).expect("EPUB content");
+    }
+    writer.finish().expect("finish EPUB");
 }

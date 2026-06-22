@@ -12,7 +12,9 @@ pub const DEFAULT_CONFIG_FILE: &str = "contextforge.toml";
 pub const EXAMPLE_CONFIG: &str = r#"# ContextForge configuration
 
 [scanner]
-max_file_bytes = 1048576
+max_file_bytes = 8388608
+max_document_bytes = 67108864
+pdf_timeout_seconds = 5
 ignore_patterns = [".git", "target", "node_modules", "dist", "build", "out", "demo-output", "venv"]
 include_paths = []
 exclude_paths = []
@@ -34,6 +36,8 @@ pub struct AppConfig {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 struct ScannerConfig {
     max_file_bytes: Option<u64>,
+    max_document_bytes: Option<u64>,
+    pdf_timeout_seconds: Option<u64>,
     ignore_patterns: Option<Vec<String>>,
     include_paths: Option<Vec<String>>,
     exclude_paths: Option<Vec<String>>,
@@ -68,6 +72,12 @@ impl AppConfig {
         let mut options = ScanOptions::default();
         if let Some(max_file_bytes) = self.scanner.max_file_bytes {
             options.max_file_bytes = max_file_bytes;
+        }
+        if let Some(max_document_bytes) = self.scanner.max_document_bytes {
+            options.max_document_bytes = max_document_bytes;
+        }
+        if let Some(pdf_timeout_seconds) = self.scanner.pdf_timeout_seconds {
+            options.pdf_timeout_seconds = pdf_timeout_seconds;
         }
         if let Some(ignore_patterns) = &self.scanner.ignore_patterns {
             for pattern in ignore_patterns {
@@ -160,7 +170,9 @@ mod tests {
     fn example_config_can_be_loaded() {
         let config: AppConfig = toml::from_str(EXAMPLE_CONFIG).expect("example config parses");
 
-        assert_eq!(config.scan_options().max_file_bytes, 1_048_576);
+        assert_eq!(config.scan_options().max_file_bytes, 8 * 1024 * 1024);
+        assert_eq!(config.scan_options().max_document_bytes, 64 * 1024 * 1024);
+        assert_eq!(config.scan_options().pdf_timeout_seconds, 5);
         assert_eq!(config.output_values().bundle, "context-bundle.md");
     }
 
@@ -192,7 +204,7 @@ mod tests {
         let path = temp.path().join(DEFAULT_CONFIG_FILE);
         fs::write(
             &path,
-            "[scanner]\nmax_file_bytes = 64\nignore_patterns = [\"target\", \"custom-cache\"]\n\n[output]\nbundle = \"bundle.md\"\n",
+            "[scanner]\nmax_file_bytes = 64\nmax_document_bytes = 128\npdf_timeout_seconds = 7\nignore_patterns = [\"target\", \"custom-cache\"]\n\n[output]\nbundle = \"bundle.md\"\n",
         )
         .expect("config file");
 
@@ -201,6 +213,8 @@ mod tests {
         let output = config.output_values();
 
         assert_eq!(scan_options.max_file_bytes, 64);
+        assert_eq!(scan_options.max_document_bytes, 128);
+        assert_eq!(scan_options.pdf_timeout_seconds, 7);
         assert!(scan_options
             .ignored_directories
             .contains(&".git".to_string()));

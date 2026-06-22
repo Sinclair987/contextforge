@@ -1,12 +1,19 @@
-use std::path::PathBuf;
+use std::{
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Mutex,
+    },
+    thread,
+};
 
 use serde::Serialize;
 
 use crate::{
     audit::{audit_text, PrivacyFinding},
     chunk::{split_document, Chunk},
-    extract::{Extractor, TextExtractor},
-    scanner::{scan_directory, ScanOptions, ScanSummary},
+    extract::{Document, Extractor, TextExtractor},
+    scanner::{scan_directory, FileInfo, FileKind, ScanOptions, ScanSummary},
     Result,
 };
 
@@ -24,27 +31,48 @@ pub struct Corpus {
     pub extraction_issues: Vec<ExtractionIssue>,
 }
 
+const MAX_PDF_WORKERS: usize = 3;
+
+enum ExtractionOutcome {
+    Document(Document),
+    Issue(ExtractionIssue),
+}
+
 pub fn load_corpus(source: &std::path::Path, options: &ScanOptions) -> Result<Corpus> {
     let scan = scan_directory(source, options)?;
-    let extractor = TextExtractor;
+    let extractor = TextExtractor::new(options.pdf_timeout_seconds);
     let mut chunks = Vec::new();
     let mut privacy_findings = Vec::new();
     let mut extraction_issues = Vec::new();
 
-    for file in &scan.files {
+    let mut outcomes = Vec::new();
+    let mut pdf_files = Vec::new();
+    for (index, file) in scan.files.iter().enumerate() {
         if !extractor.supports(file) {
             continue;
         }
 
-        match extractor.extract(file) {
-            Ok(document) => {
+        if file.kind == FileKind::Pdf {
+            pdf_files.push((index, file));
+        } else {
+            outcomes.push((index, extract_file(&extractor, file)));
+        }
+    }
+
+    outcomes.extend(bounded_parallel_map(
+        &pdf_files,
+        pdf_worker_limit(),
+        |(index, file)| (*index, extract_file(&extractor, file)),
+    ));
+    outcomes.sort_by_key(|(index, _)| *index);
+
+    for (_, outcome) in outcomes {
+        match outcome {
+            ExtractionOutcome::Document(document) => {
                 privacy_findings.extend(audit_text(&document.path, &document.text));
                 chunks.extend(split_document(&document));
             }
-            Err(error) => extraction_issues.push(ExtractionIssue {
-                path: file.path.clone(),
-                message: error.to_string(),
-            }),
+            ExtractionOutcome::Issue(issue) => extraction_issues.push(issue),
         }
     }
 
@@ -61,4 +89,85 @@ pub fn load_corpus(source: &std::path::Path, options: &ScanOptions) -> Result<Co
         privacy_findings,
         extraction_issues,
     })
+}
+
+fn pdf_worker_limit() -> usize {
+    thread::available_parallelism()
+        .map_or(1, usize::from)
+        .min(MAX_PDF_WORKERS)
+}
+
+fn extract_file(extractor: &TextExtractor, file: &FileInfo) -> ExtractionOutcome {
+    match extractor.extract(file) {
+        Ok(document) => ExtractionOutcome::Document(document),
+        Err(error) => ExtractionOutcome::Issue(ExtractionIssue {
+            path: file.path.clone(),
+            message: error.to_string(),
+        }),
+    }
+}
+
+fn bounded_parallel_map<T, U, F>(items: &[T], worker_limit: usize, operation: F) -> Vec<U>
+where
+    T: Sync,
+    U: Send,
+    F: Fn(&T) -> U + Sync,
+{
+    if items.is_empty() {
+        return Vec::new();
+    }
+
+    let next = AtomicUsize::new(0);
+    let results = Mutex::new(Vec::with_capacity(items.len()));
+    let worker_count = worker_limit.max(1).min(items.len());
+
+    thread::scope(|scope| {
+        for _ in 0..worker_count {
+            scope.spawn(|| loop {
+                let index = next.fetch_add(1, Ordering::Relaxed);
+                let Some(item) = items.get(index) else {
+                    break;
+                };
+                let output = operation(item);
+                results
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push((index, output));
+            });
+        }
+    });
+
+    let mut results = results
+        .into_inner()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    results.sort_by_key(|(index, _)| *index);
+    results.into_iter().map(|(_, output)| output).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        thread,
+        time::Duration,
+    };
+
+    #[test]
+    fn bounded_parallel_map_preserves_order_and_worker_limit() {
+        let active = AtomicUsize::new(0);
+        let maximum_active = AtomicUsize::new(0);
+        let values = [1, 2, 3, 4, 5, 6];
+
+        let doubled = bounded_parallel_map(&values, 3, |value| {
+            let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+            maximum_active.fetch_max(current, Ordering::SeqCst);
+            thread::sleep(Duration::from_millis(20));
+            active.fetch_sub(1, Ordering::SeqCst);
+            value * 2
+        });
+
+        assert_eq!(doubled, vec![2, 4, 6, 8, 10, 12]);
+        assert!((2..=3).contains(&maximum_active.load(Ordering::SeqCst)));
+    }
 }

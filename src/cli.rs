@@ -31,6 +31,9 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    #[command(name = "__extract-pdf-worker", hide = true)]
+    ExtractPdfWorker { input: PathBuf, output: PathBuf },
+
     /// Generate a sample contextforge.toml configuration file.
     Init {
         /// Directory where contextforge.toml is created.
@@ -194,6 +197,9 @@ where
     let cli = Cli::parse_from(args);
 
     match cli.command {
+        Commands::ExtractPdfWorker { input, output } => {
+            crate::extract::write_pdf_worker_output(&input, &output)
+        }
         Commands::Init { source } => init_source_directory(&source),
         Commands::Scan {
             source,
@@ -304,6 +310,7 @@ fn print_scan_summary(summary: &ScanSummary) {
     print_kind_count(summary, FileKind::Html);
     print_kind_count(summary, FileKind::Pdf);
     print_kind_count(summary, FileKind::Docx);
+    print_kind_count(summary, FileKind::Epub);
     print_kind_count(summary, FileKind::Other);
     println!();
     println!("Skipped:");

@@ -19,6 +19,8 @@ fn init_creates_contextforge_toml_in_current_directory() {
     let content = fs::read_to_string(config_path).expect("generated config file");
     assert!(content.contains("[scanner]"));
     assert!(content.contains("max_file_bytes"));
+    assert!(content.contains("max_document_bytes"));
+    assert!(content.contains("pdf_timeout_seconds"));
 }
 
 #[test]

@@ -13,7 +13,7 @@ use crate::{
     config::OutputConfigValues,
     corpus::{load_corpus, ExtractionIssue},
     rank::{rank_chunks, QueryTerms, RankedChunk, ScoreBreakdown},
-    scanner::ScanOptions,
+    scanner::{ScanOptions, SkipReason},
     ContextForgeError, Result,
 };
 
@@ -232,6 +232,19 @@ pub fn pack_directory_with_options(
 
     let scan_options = pack_scan_options(source, output_dir, &options.scan_options);
     let corpus = load_corpus(source, &scan_options)?;
+    if corpus.chunks.is_empty() {
+        return Err(ContextForgeError::NoReadableContext {
+            scanned: corpus.scan.files.len(),
+            skipped: corpus.scan.skipped.len(),
+            too_large: corpus.scan.count_by_skip_reason(SkipReason::TooLarge),
+            binary: corpus.scan.count_by_skip_reason(SkipReason::Binary),
+            filtered: corpus.scan.count_by_skip_reason(SkipReason::FilteredPath),
+            ignored: corpus
+                .scan
+                .count_by_skip_reason(SkipReason::IgnoredDirectory),
+            extraction_warnings: corpus.extraction_issues.len(),
+        });
+    }
     let terms = QueryTerms::parse(goal);
     let ranked_chunks = rank_chunks(corpus.chunks, &terms);
     if ranked_chunks.is_empty() {

@@ -1,20 +1,30 @@
 use std::{
     any::Any,
     cell::Cell,
-    fs,
+    env, fs,
     io::Read,
     panic::{self, UnwindSafe},
     path::{Path, PathBuf},
+    process::{self, Child, Command, ExitStatus, Stdio},
     sync::Once,
+    thread,
+    time::{Duration, Instant},
 };
 
 use quick_xml::{events::Event, Reader};
+use tempfile::TempDir;
 use zip::ZipArchive;
+
+mod epub;
+
+use epub::extract_epub_text;
 
 use crate::{
     scanner::{FileInfo, FileKind},
     ContextForgeError, Result,
 };
+
+pub(super) const MAX_EXPANDED_DOCUMENT_BYTES: u64 = 128 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DocumentKind {
@@ -31,6 +41,7 @@ pub enum DocumentKind {
     Html,
     Pdf,
     Docx,
+    Epub,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,8 +56,24 @@ pub trait Extractor {
     fn extract(&self, file: &FileInfo) -> Result<Document>;
 }
 
-#[derive(Debug, Default)]
-pub struct TextExtractor;
+#[derive(Debug, Clone, Copy)]
+pub struct TextExtractor {
+    pdf_timeout: Duration,
+}
+
+impl TextExtractor {
+    pub fn new(pdf_timeout_seconds: u64) -> Self {
+        Self {
+            pdf_timeout: Duration::from_secs(pdf_timeout_seconds),
+        }
+    }
+}
+
+impl Default for TextExtractor {
+    fn default() -> Self {
+        Self::new(5)
+    }
+}
 
 impl Extractor for TextExtractor {
     fn supports(&self, file: &FileInfo) -> bool {
@@ -74,8 +101,9 @@ impl Extractor for TextExtractor {
                 let text = read_utf8_text(&file.path)?;
                 extract_markup_text(&text)
             }
-            DocumentKind::Pdf => extract_pdf_text(&file.path)?,
+            DocumentKind::Pdf => extract_pdf_text(&file.path, self.pdf_timeout)?,
             DocumentKind::Docx => extract_docx_text(&file.path)?,
+            DocumentKind::Epub => extract_epub_text(&file.path)?,
         };
 
         Ok(Document {
@@ -93,9 +121,109 @@ fn read_utf8_text(path: &Path) -> Result<String> {
     })
 }
 
-fn extract_pdf_text(path: &Path) -> Result<String> {
+fn extract_pdf_text(path: &Path, timeout: Duration) -> Result<String> {
+    let output = PdfWorkerOutput::new(path)?;
+    let executable = env::current_exe().map_err(|error| ContextForgeError::ExtractPdfWorker {
+        path: path.to_path_buf(),
+        message: error.to_string(),
+    })?;
+    let mut child = Command::new(executable)
+        .arg("__extract-pdf-worker")
+        .arg(path)
+        .arg(output.path())
+        .env("CONTEXTFORGE_PDF_WORKER_PARENT_PIPE", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| ContextForgeError::ExtractPdfWorker {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        })?;
+
+    let status = wait_for_pdf_worker(&mut child, path, timeout)?;
+    if !status.success() {
+        return Err(ContextForgeError::ExtractPdfWorker {
+            path: path.to_path_buf(),
+            message: pdf_worker_stderr(&mut child, status),
+        });
+    }
+
+    fs::read_to_string(output.path()).map_err(|error| ContextForgeError::ExtractPdfWorker {
+        path: path.to_path_buf(),
+        message: error.to_string(),
+    })
+}
+
+pub(crate) fn write_pdf_worker_output(path: &Path, output: &Path) -> Result<()> {
+    start_pdf_worker_parent_monitor();
+    let text = extract_pdf_text_in_process(path)?;
+    fs::write(output, text).map_err(|source| ContextForgeError::WritePdfWorkerOutput {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+fn extract_pdf_text_in_process(path: &Path) -> Result<String> {
     let text = run_pdf_extractor(path, || pdf_extract::extract_text(path))?;
     Ok(normalize_extracted_document_text(&text))
+}
+
+struct PdfWorkerOutput {
+    _directory: TempDir,
+    path: PathBuf,
+}
+
+impl PdfWorkerOutput {
+    fn new(source_path: &Path) -> Result<Self> {
+        let directory = tempfile::Builder::new()
+            .prefix("contextforge-pdf-")
+            .tempdir()
+            .map_err(|error| ContextForgeError::ExtractPdfWorker {
+                path: source_path.to_path_buf(),
+                message: error.to_string(),
+            })?;
+        let path = directory.path().join("output.txt");
+        Ok(Self {
+            _directory: directory,
+            path,
+        })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+fn pdf_worker_stderr(child: &mut Child, status: ExitStatus) -> String {
+    let mut message = String::new();
+    if let Some(mut stderr) = child.stderr.take() {
+        let _ = stderr.read_to_string(&mut message);
+    }
+    let message = message
+        .trim()
+        .strip_prefix("error: ")
+        .unwrap_or_else(|| message.trim())
+        .to_string();
+    if message.is_empty() {
+        format!("worker exited with {status}")
+    } else {
+        message
+    }
+}
+
+fn start_pdf_worker_parent_monitor() {
+    if env::var_os("CONTEXTFORGE_PDF_WORKER_PARENT_PIPE").is_none()
+        && env::var_os("CONTEXTFORGE_TEST_PARENT_MONITOR").is_none()
+    {
+        return;
+    }
+
+    thread::spawn(|| {
+        let mut byte = [0_u8; 1];
+        let _ = std::io::stdin().read(&mut byte);
+        process::exit(1);
+    });
 }
 
 thread_local! {
@@ -122,6 +250,32 @@ where
             path: path.to_path_buf(),
             message: panic_payload_message(payload.as_ref()),
         }),
+    }
+}
+
+fn wait_for_pdf_worker(child: &mut Child, path: &Path, timeout: Duration) -> Result<ExitStatus> {
+    let started = Instant::now();
+    loop {
+        let status = child
+            .try_wait()
+            .map_err(|error| ContextForgeError::ExtractPdfWorker {
+                path: path.to_path_buf(),
+                message: error.to_string(),
+            })?;
+        if let Some(status) = status {
+            return Ok(status);
+        }
+
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(ContextForgeError::ExtractPdfTimeout {
+                path: path.to_path_buf(),
+                seconds: timeout.as_secs(),
+            });
+        }
+
+        thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -162,6 +316,7 @@ fn extract_docx_text(path: &Path) -> Result<String> {
             source,
         }
     })?;
+    ensure_expanded_document_size(path, document_xml.size(), "DOCX")?;
     let mut xml = String::new();
     document_xml
         .read_to_string(&mut xml)
@@ -171,6 +326,17 @@ fn extract_docx_text(path: &Path) -> Result<String> {
         })?;
 
     extract_docx_xml_text(path, &xml).map(|text| normalize_extracted_document_text(&text))
+}
+
+fn ensure_expanded_document_size(path: &Path, size: u64, kind: &'static str) -> Result<()> {
+    if size <= MAX_EXPANDED_DOCUMENT_BYTES {
+        return Ok(());
+    }
+    Err(ContextForgeError::ExpandedDocumentTooLarge {
+        path: path.to_path_buf(),
+        kind,
+        maximum_mib: MAX_EXPANDED_DOCUMENT_BYTES / 1024 / 1024,
+    })
 }
 
 fn extract_docx_xml_text(path: &Path, xml: &str) -> Result<String> {
@@ -401,6 +567,7 @@ fn document_kind(kind: FileKind) -> Option<DocumentKind> {
         FileKind::Html => Some(DocumentKind::Html),
         FileKind::Pdf => Some(DocumentKind::Pdf),
         FileKind::Docx => Some(DocumentKind::Docx),
+        FileKind::Epub => Some(DocumentKind::Epub),
         FileKind::Other => None,
     }
 }
@@ -409,7 +576,11 @@ fn document_kind(kind: FileKind) -> Option<DocumentKind> {
 mod tests {
     use super::*;
     use crate::scanner::FileInfo;
-    use std::fs;
+    use std::{
+        fs,
+        process::{Command, Stdio},
+        time::{Duration, Instant},
+    };
     use tempfile::tempdir;
 
     #[test]
@@ -423,7 +594,7 @@ mod tests {
             kind: FileKind::Markdown,
         };
 
-        let extractor = TextExtractor;
+        let extractor = TextExtractor::default();
         let document = extractor.extract(&file).expect("document");
 
         assert_eq!(document.kind, DocumentKind::Markdown);
@@ -446,7 +617,7 @@ mod tests {
             kind: FileKind::Html,
         };
 
-        let document = TextExtractor.extract(&file).expect("document");
+        let document = TextExtractor::default().extract(&file).expect("document");
 
         assert_eq!(document.kind, DocumentKind::Html);
         assert_eq!(document.text, "Ownership\nBorrowing & lifetimes");
@@ -460,7 +631,7 @@ mod tests {
             kind: FileKind::Other,
         };
 
-        let extractor = TextExtractor;
+        let extractor = TextExtractor::default();
 
         assert!(!extractor.supports(&file));
     }
@@ -475,6 +646,85 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "PDF extractor could not process `gbk.pdf`: unsupported encoding GBK-EUC-H"
+        );
+    }
+
+    #[test]
+    fn pdf_worker_timeout_terminates_hung_child() {
+        let mut child = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "extract::tests::pdf_worker_timeout_fixture",
+                "--ignored",
+            ])
+            .env("CONTEXTFORGE_TEST_SLEEP", "1")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("sleeping test child");
+        let started = Instant::now();
+
+        let error = wait_for_pdf_worker(
+            &mut child,
+            Path::new("slow.pdf"),
+            Duration::from_millis(100),
+        )
+        .expect_err("PDF timeout");
+
+        assert!(matches!(error, ContextForgeError::ExtractPdfTimeout { .. }));
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn pdf_worker_stops_when_parent_pipe_closes() {
+        let mut child = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "extract::tests::pdf_worker_timeout_fixture",
+                "--ignored",
+            ])
+            .env("CONTEXTFORGE_TEST_PARENT_MONITOR", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("monitored test child");
+
+        drop(child.stdin.take());
+        let status = wait_for_pdf_worker(
+            &mut child,
+            Path::new("orphaned.pdf"),
+            Duration::from_secs(1),
+        )
+        .expect("worker exits when parent pipe closes");
+
+        assert!(!status.success());
+    }
+
+    #[test]
+    #[ignore]
+    fn pdf_worker_timeout_fixture() {
+        if std::env::var_os("CONTEXTFORGE_TEST_PARENT_MONITOR").is_some() {
+            start_pdf_worker_parent_monitor();
+        }
+        if std::env::var_os("CONTEXTFORGE_TEST_SLEEP").is_some() {
+            std::thread::sleep(Duration::from_secs(5));
+        }
+        std::thread::sleep(Duration::from_secs(5));
+    }
+
+    #[test]
+    fn expanded_document_size_rejects_content_beyond_the_safety_limit() {
+        let error = ensure_expanded_document_size(
+            Path::new("large.docx"),
+            MAX_EXPANDED_DOCUMENT_BYTES + 1,
+            "DOCX",
+        )
+        .expect_err("expanded document size error");
+
+        assert_eq!(
+            error.to_string(),
+            "expanded DOCX text in `large.docx` exceeds 128 MiB"
         );
     }
 

@@ -368,6 +368,35 @@ fn pack_does_not_write_an_empty_bundle_when_nothing_matches() {
 }
 
 #[test]
+fn pack_explains_why_no_readable_context_was_loaded() {
+    let temp = tempdir().expect("temporary directory");
+    let source = temp.path().join("source");
+    let config = temp.path().join("limits.toml");
+    fs::create_dir_all(&source).expect("source directory");
+    fs::write(source.join("oversized.md"), "123456789").expect("oversized text");
+    fs::write(source.join("unsupported.mobi"), [0_u8, 1, 2, 3]).expect("binary file");
+    fs::write(
+        &config,
+        "[scanner]\nmax_file_bytes = 4\nmax_document_bytes = 8\n",
+    )
+    .expect("test configuration");
+
+    Command::cargo_bin("contextforge")
+        .expect("contextforge binary")
+        .arg("--config")
+        .arg(&config)
+        .args(["pack", "missing context", "--source"])
+        .arg(&source)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no readable context"))
+        .stderr(predicate::str::contains("scanned: 0"))
+        .stderr(predicate::str::contains("skipped: 2"))
+        .stderr(predicate::str::contains("too large: 1"))
+        .stderr(predicate::str::contains("binary: 1"));
+}
+
+#[test]
 fn pack_rejects_budget_too_small_for_bundle_overhead() {
     let temp = tempdir().expect("temporary directory");
     fs::write(temp.path().join("notes.md"), "target\n").expect("source file");
