@@ -69,6 +69,9 @@ pub enum ContextForgeError {
         source: pdf_extract::OutputError,
     },
 
+    #[error("PDF extractor could not process `{path}`: {message}")]
+    ExtractPdfPanic { path: PathBuf, message: String },
+
     #[error("failed to open DOCX archive `{path}`")]
     OpenDocxArchive {
         path: PathBuf,

@@ -1,7 +1,11 @@
 use std::{
+    any::Any,
+    cell::Cell,
     fs,
     io::Read,
+    panic::{self, UnwindSafe},
     path::{Path, PathBuf},
+    sync::Once,
 };
 
 use quick_xml::{events::Event, Reader};
@@ -90,11 +94,56 @@ fn read_utf8_text(path: &Path) -> Result<String> {
 }
 
 fn extract_pdf_text(path: &Path) -> Result<String> {
-    let text = pdf_extract::extract_text(path).map_err(|source| ContextForgeError::ExtractPdf {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let text = run_pdf_extractor(path, || pdf_extract::extract_text(path))?;
     Ok(normalize_extracted_document_text(&text))
+}
+
+thread_local! {
+    static PDF_EXTRACTION_ACTIVE: Cell<bool> = const { Cell::new(false) };
+}
+
+static INSTALL_PDF_PANIC_HOOK: Once = Once::new();
+
+fn run_pdf_extractor<F>(path: &Path, extract: F) -> Result<String>
+where
+    F: FnOnce() -> std::result::Result<String, pdf_extract::OutputError> + UnwindSafe,
+{
+    install_pdf_panic_hook();
+    let previous_state = PDF_EXTRACTION_ACTIVE.with(|active| active.replace(true));
+    let extracted = panic::catch_unwind(extract);
+    PDF_EXTRACTION_ACTIVE.with(|active| active.set(previous_state));
+
+    match extracted {
+        Ok(result) => result.map_err(|source| ContextForgeError::ExtractPdf {
+            path: path.to_path_buf(),
+            source,
+        }),
+        Err(payload) => Err(ContextForgeError::ExtractPdfPanic {
+            path: path.to_path_buf(),
+            message: panic_payload_message(payload.as_ref()),
+        }),
+    }
+}
+
+fn install_pdf_panic_hook() {
+    INSTALL_PDF_PANIC_HOOK.call_once(|| {
+        let previous_hook = panic::take_hook();
+        panic::set_hook(Box::new(move |info| {
+            if !PDF_EXTRACTION_ACTIVE.with(Cell::get) {
+                previous_hook(info);
+            }
+        }));
+    });
+}
+
+fn panic_payload_message(payload: &(dyn Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        return (*message).to_string();
+    }
+    if let Some(message) = payload.downcast_ref::<String>() {
+        return message.clone();
+    }
+    "unknown PDF extractor failure".to_string()
 }
 
 fn extract_docx_text(path: &Path) -> Result<String> {
@@ -414,6 +463,19 @@ mod tests {
         let extractor = TextExtractor;
 
         assert!(!extractor.supports(&file));
+    }
+
+    #[test]
+    fn pdf_extraction_converts_dependency_panics_to_errors() {
+        let error = run_pdf_extractor(Path::new("gbk.pdf"), || {
+            panic!("unsupported encoding GBK-EUC-H")
+        })
+        .expect_err("PDF extraction error");
+
+        assert_eq!(
+            error.to_string(),
+            "PDF extractor could not process `gbk.pdf`: unsupported encoding GBK-EUC-H"
+        );
     }
 
     #[test]
