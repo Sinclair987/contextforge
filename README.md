@@ -39,7 +39,6 @@ contextforge scan
 contextforge search "所有权 借用"
 contextforge audit
 contextforge pack "所有权与借用"
-contextforge metrics
 ```
 
 `pack` 默认使用当前目录作为源目录、6000 estimated tokens 作为预算，并将结果写入当前目录下的 `contextforge-output`。
@@ -178,4 +177,3 @@ cargo clippy --all-targets --all-features -- -D warnings
 - `src/budget/`：预算与多文件选择
 - `src/audit/`：隐私和指令覆盖检测
 - `src/pack/`：bundle、manifest 和 report 生成
-- `src/metrics/`：Rust 项目指标分析

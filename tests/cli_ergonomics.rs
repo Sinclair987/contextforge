@@ -15,6 +15,28 @@ fn version_flag_prints_package_version() {
 }
 
 #[test]
+fn help_does_not_list_metrics_command() {
+    Command::cargo_bin("contextforge")
+        .expect("contextforge binary")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\n  metrics ").not());
+}
+
+#[test]
+fn metrics_is_not_an_available_subcommand() {
+    Command::cargo_bin("contextforge")
+        .expect("contextforge binary")
+        .arg("metrics")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "unrecognized subcommand 'metrics'",
+        ));
+}
+
+#[test]
 fn scan_uses_current_directory_when_source_is_omitted() {
     let temp = tempdir().expect("temporary directory");
     fs::write(temp.path().join("notes.md"), "# useful notes\n").expect("source file");

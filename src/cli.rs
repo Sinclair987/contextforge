@@ -10,7 +10,6 @@ use crate::{
     audit::{audit_directory_report_with_options, PrivacyFinding, Severity},
     config::{load_config_for_source, write_default_config, AppConfig, DEFAULT_CONFIG_FILE},
     corpus::ExtractionIssue,
-    metrics::{analyze_rust_project, RustFileMetrics, RustProjectMetrics},
     pack::{pack_directory_with_options, PackFileNames, PackOptions, PackResult},
     scanner::{scan_directory, FileKind, ScanSummary, SkipReason},
     search::{search_directory_report_with_options, SearchHit},
@@ -99,17 +98,6 @@ enum Commands {
         exclude: Vec<PathBuf>,
     },
 
-    /// Analyze Rust source metrics and course requirement signals.
-    Metrics {
-        /// Directory to analyze.
-        #[arg(short, long, default_value = ".")]
-        source: PathBuf,
-
-        /// Output format.
-        #[arg(long, value_enum, default_value_t = MetricsFormat::Text)]
-        format: MetricsFormat,
-    },
-
     /// Generate a context bundle, manifest, and report.
     Pack {
         /// Directory to pack.
@@ -156,12 +144,6 @@ enum Commands {
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum AuditFormat {
-    Text,
-    Json,
-}
-
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum MetricsFormat {
     Text,
     Json,
 }
@@ -244,7 +226,6 @@ where
             let scan_options = scan_options_with_filters(&config, include, exclude);
             audit_source_directory(&source, format, limit, &scan_options)
         }
-        Commands::Metrics { source, format } => metrics_source_directory(&source, format),
         Commands::Pack {
             source,
             goal,
@@ -466,92 +447,6 @@ fn print_json_audit_findings(
             .collect(),
     };
     let output = serde_json::to_string_pretty(&report)
-        .map_err(|source| ContextForgeError::SerializeOutput { source })?;
-    println!("{output}");
-    Ok(())
-}
-
-fn metrics_source_directory(source: &Path, format: MetricsFormat) -> Result<()> {
-    let metrics = analyze_rust_project(source)?;
-    match format {
-        MetricsFormat::Text => print_metrics(&metrics),
-        MetricsFormat::Json => print_json_metrics(&metrics)?,
-    }
-    Ok(())
-}
-
-fn print_metrics(metrics: &RustProjectMetrics) {
-    let summary = &metrics.summary;
-    println!("Rust project metrics");
-    println!("Source: {}", metrics.source.display());
-    println!("Rust files: {}", summary.rust_files);
-    println!("Source files: {}", summary.source_files);
-    println!("Test files: {}", summary.test_files);
-    println!("Total lines: {}", summary.total_lines);
-    println!("Effective lines: {}", summary.effective_lines);
-    println!("Effective lines in src: {}", summary.source_effective_lines);
-    println!("Effective lines in tests: {}", summary.test_effective_lines);
-    println!("Blank lines: {}", summary.blank_lines);
-    println!("Comment-only lines: {}", summary.comment_lines);
-    println!();
-    println!("Rust feature signals:");
-    println!("  Modules declared: {}", summary.modules_declared);
-    println!("  Structs: {}", summary.structs);
-    println!("  Enums: {}", summary.enums);
-    println!("  Traits: {}", summary.traits);
-    println!("  Impl blocks: {}", summary.impl_blocks);
-    println!("  Functions: {}", summary.functions);
-    println!("  Public item lines: {}", summary.public_items);
-    println!("  Async functions: {}", summary.async_functions);
-    println!("  Generic item lines: {}", summary.generic_item_lines);
-    println!("  Lifetime lines: {}", summary.lifetime_lines);
-    println!("  Result mentions: {}", summary.result_mentions);
-    println!("  Test functions: {}", summary.test_functions);
-    println!();
-    println!("Risk signals:");
-    println!("  unwrap calls: {}", summary.unwrap_calls);
-    println!("  expect calls: {}", summary.expect_calls);
-    println!("  panic macros: {}", summary.panic_macros);
-    println!("  todo/unimplemented macros: {}", summary.todo_macros);
-    println!("  unsafe mentions: {}", summary.unsafe_mentions);
-    println!();
-    println!("Requirement signals:");
-    for check in &metrics.assessment.checks {
-        println!(
-            "  [{}] {} - {}",
-            check.status.label(),
-            check.name,
-            check.detail
-        );
-    }
-    println!();
-    println!("Largest Rust files:");
-    for file in largest_files(&metrics.files, 8) {
-        println!(
-            "  {} | {} | {} effective / {} total lines | {} fn | {} tests",
-            file.path.display(),
-            file.area.label(),
-            file.effective_lines,
-            file.total_lines,
-            file.functions,
-            file.test_functions
-        );
-    }
-}
-
-fn largest_files(files: &[RustFileMetrics], limit: usize) -> Vec<&RustFileMetrics> {
-    let mut sorted = files.iter().collect::<Vec<_>>();
-    sorted.sort_by(|left, right| {
-        right
-            .effective_lines
-            .cmp(&left.effective_lines)
-            .then_with(|| left.path.cmp(&right.path))
-    });
-    sorted.into_iter().take(limit).collect()
-}
-
-fn print_json_metrics(metrics: &RustProjectMetrics) -> Result<()> {
-    let output = serde_json::to_string_pretty(metrics)
         .map_err(|source| ContextForgeError::SerializeOutput { source })?;
     println!("{output}");
     Ok(())
