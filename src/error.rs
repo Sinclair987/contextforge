@@ -4,6 +4,18 @@ pub type Result<T> = std::result::Result<T, ContextForgeError>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ContextForgeError {
+    #[error("context goal must not be blank")]
+    InvalidGoal,
+
+    #[error("token budget must be greater than zero")]
+    InvalidBudget,
+
+    #[error("token budget is too small for bundle metadata; use at least {minimum} tokens")]
+    BudgetTooSmall { minimum: usize },
+
+    #[error("no context matched the goal: {goal}")]
+    NoMatchingContext { goal: String },
+
     #[error("configuration file already exists: {path}")]
     ConfigExists { path: PathBuf },
 

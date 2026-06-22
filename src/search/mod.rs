@@ -2,7 +2,8 @@ use std::path::{Path, PathBuf};
 
 use crate::{
     chunk::ChunkKind,
-    rank::{rank_directory_with_options, ScoreBreakdown},
+    corpus::{load_corpus, ExtractionIssue},
+    rank::{rank_chunks, QueryTerms, ScoreBreakdown},
     scanner::ScanOptions,
     Result,
 };
@@ -21,6 +22,12 @@ pub struct SearchHit {
     pub score_breakdown: ScoreBreakdown,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchResult {
+    pub hits: Vec<SearchHit>,
+    pub extraction_issues: Vec<ExtractionIssue>,
+}
+
 pub fn search_directory(source: &Path, query: &str) -> Result<Vec<SearchHit>> {
     search_directory_with_options(source, query, &ScanOptions::default())
 }
@@ -30,8 +37,20 @@ pub fn search_directory_with_options(
     query: &str,
     scan_options: &ScanOptions,
 ) -> Result<Vec<SearchHit>> {
-    rank_directory_with_options(source, query, scan_options).map(|ranked| {
-        ranked
+    search_directory_report_with_options(source, query, scan_options).map(|result| result.hits)
+}
+
+pub fn search_directory_report_with_options(
+    source: &Path,
+    query: &str,
+    scan_options: &ScanOptions,
+) -> Result<SearchResult> {
+    let corpus = load_corpus(source, scan_options)?;
+    let terms = QueryTerms::parse(query);
+    let hits = if terms.is_empty() {
+        Vec::new()
+    } else {
+        rank_chunks(corpus.chunks, &terms)
             .into_iter()
             .map(|chunk| SearchHit {
                 path: chunk.path,
@@ -46,6 +65,11 @@ pub fn search_directory_with_options(
                 score_breakdown: chunk.score_breakdown,
             })
             .collect()
+    };
+
+    Ok(SearchResult {
+        hits,
+        extraction_issues: corpus.extraction_issues,
     })
 }
 

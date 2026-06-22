@@ -496,8 +496,22 @@ fn ends_sentence(line: &str) -> bool {
         .is_some_and(|ch| matches!(ch, '.' | '。' | '!' | '！' | '?' | '？' | ';' | '；'))
 }
 
-fn estimate_tokens(text: &str) -> usize {
-    (text.chars().count() / 4).max(1)
+pub(crate) fn estimate_tokens(text: &str) -> usize {
+    let mut tokens = 0usize;
+    let mut ascii_chars = 0usize;
+
+    for character in text.chars() {
+        if character.is_ascii() || character.is_whitespace() {
+            ascii_chars += 1;
+            continue;
+        }
+
+        tokens += ascii_chars.div_ceil(4);
+        ascii_chars = 0;
+        tokens += 1;
+    }
+
+    (tokens + ascii_chars.div_ceil(4)).max(1)
 }
 
 fn markdown_heading_title(line: &str) -> Option<String> {
@@ -772,5 +786,15 @@ mod tests {
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].start_line, 1);
         assert_eq!(chunks[0].end_line, 7);
+    }
+
+    #[test]
+    fn estimate_tokens_counts_cjk_characters_conservatively() {
+        assert_eq!(estimate_tokens("中文上下文"), 5);
+    }
+
+    #[test]
+    fn estimate_tokens_keeps_ascii_four_character_heuristic() {
+        assert_eq!(estimate_tokens("abcdefgh"), 2);
     }
 }

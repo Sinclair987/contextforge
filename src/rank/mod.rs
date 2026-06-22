@@ -6,9 +6,9 @@ use std::{
 use serde::Serialize;
 
 use crate::{
-    chunk::{split_document, Chunk, ChunkKind},
-    extract::{Extractor, TextExtractor},
-    scanner::{scan_directory, ScanOptions},
+    chunk::{Chunk, ChunkKind},
+    corpus::load_corpus,
+    scanner::ScanOptions,
     Result,
 };
 
@@ -338,20 +338,8 @@ pub fn rank_directory_with_options(
         return Ok(Vec::new());
     }
 
-    let scan = scan_directory(source, scan_options)?;
-    let extractor = TextExtractor;
-    let mut chunks = Vec::new();
-
-    for file in &scan.files {
-        if !extractor.supports(file) {
-            continue;
-        }
-
-        let document = extractor.extract(file)?;
-        chunks.extend(split_document(&document));
-    }
-
-    Ok(rank_chunks(chunks, &terms))
+    let corpus = load_corpus(source, scan_options)?;
+    Ok(rank_chunks(corpus.chunks, &terms))
 }
 
 pub fn rank_chunks(

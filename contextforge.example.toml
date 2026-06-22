@@ -3,6 +3,8 @@
 [scanner]
 max_file_bytes = 1048576
 ignore_patterns = [".git", "target", "node_modules", "dist", "build", "out", "demo-output", "venv"]
+include_paths = []
+exclude_paths = []
 
 [output]
 bundle = "context-bundle.md"

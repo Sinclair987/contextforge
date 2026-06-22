@@ -1,4 +1,7 @@
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use serde::Deserialize;
 
@@ -11,6 +14,8 @@ pub const EXAMPLE_CONFIG: &str = r#"# ContextForge configuration
 [scanner]
 max_file_bytes = 1048576
 ignore_patterns = [".git", "target", "node_modules", "dist", "build", "out", "demo-output", "venv"]
+include_paths = []
+exclude_paths = []
 
 [output]
 bundle = "context-bundle.md"
@@ -30,6 +35,8 @@ pub struct AppConfig {
 struct ScannerConfig {
     max_file_bytes: Option<u64>,
     ignore_patterns: Option<Vec<String>>,
+    include_paths: Option<Vec<String>>,
+    exclude_paths: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -69,6 +76,12 @@ impl AppConfig {
                 }
             }
         }
+        if let Some(include_paths) = &self.scanner.include_paths {
+            options.included_paths = include_paths.iter().map(PathBuf::from).collect();
+        }
+        if let Some(exclude_paths) = &self.scanner.exclude_paths {
+            options.excluded_paths = exclude_paths.iter().map(PathBuf::from).collect();
+        }
         options
     }
 
@@ -96,27 +109,38 @@ pub fn write_default_config(path: &Path) -> Result<()> {
 }
 
 pub fn load_config(path: Option<&Path>) -> Result<AppConfig> {
-    let Some(path) = resolve_config_path(path) else {
+    load_config_for_source(path, Path::new("."))
+}
+
+pub fn load_config_for_source(path: Option<&Path>, source: &Path) -> Result<AppConfig> {
+    let Some(path) = resolve_config_path(path, source) else {
         return Ok(AppConfig::default());
     };
 
-    let content = fs::read_to_string(path).map_err(|source| ContextForgeError::ReadConfig {
-        path: path.to_path_buf(),
+    let content = fs::read_to_string(&path).map_err(|source| ContextForgeError::ReadConfig {
+        path: path.clone(),
         source,
     })?;
-    toml::from_str(&content).map_err(|source| ContextForgeError::ParseConfig {
-        path: path.to_path_buf(),
-        source,
-    })
+    toml::from_str(&content).map_err(|source| ContextForgeError::ParseConfig { path, source })
 }
 
-fn resolve_config_path(path: Option<&Path>) -> Option<&Path> {
+fn resolve_config_path(path: Option<&Path>, source: &Path) -> Option<PathBuf> {
     if let Some(path) = path {
-        return Some(path);
+        return Some(path.to_path_buf());
     }
 
-    let default_path = Path::new(DEFAULT_CONFIG_FILE);
-    default_path.exists().then_some(default_path)
+    let source_root = if source.is_file() {
+        source.parent().unwrap_or_else(|| Path::new("."))
+    } else {
+        source
+    };
+    let source_config = source_root.join(DEFAULT_CONFIG_FILE);
+    if source_config.exists() {
+        return Some(source_config);
+    }
+
+    let current_config = PathBuf::from(DEFAULT_CONFIG_FILE);
+    current_config.exists().then_some(current_config)
 }
 
 #[cfg(test)]
@@ -193,5 +217,18 @@ mod tests {
         );
         assert_eq!(output.bundle, "bundle.md");
         assert_eq!(output.manifest, "context-manifest.json");
+    }
+
+    #[test]
+    fn load_config_reads_path_filters() {
+        let config: AppConfig = toml::from_str(
+            "[scanner]\ninclude_paths = [\"docs\"]\nexclude_paths = [\"docs/private\"]\n",
+        )
+        .expect("config parses");
+
+        let options = config.scan_options();
+
+        assert_eq!(options.included_paths, vec![PathBuf::from("docs")]);
+        assert_eq!(options.excluded_paths, vec![PathBuf::from("docs/private")]);
     }
 }

@@ -129,6 +129,7 @@ fn file_name_kind(path: &Path) -> Option<FileKind> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkipReason {
     IgnoredDirectory,
+    FilteredPath,
     TooLarge,
     Binary,
 }
@@ -137,6 +138,7 @@ impl SkipReason {
     pub fn label(self) -> &'static str {
         match self {
             Self::IgnoredDirectory => "Ignored directory",
+            Self::FilteredPath => "Filtered path",
             Self::TooLarge => "Too large",
             Self::Binary => "Binary",
         }
@@ -160,6 +162,8 @@ pub struct SkippedEntry {
 pub struct ScanOptions {
     pub max_file_bytes: u64,
     pub ignored_directories: Vec<String>,
+    pub included_paths: Vec<PathBuf>,
+    pub excluded_paths: Vec<PathBuf>,
 }
 
 impl Default for ScanOptions {
@@ -176,6 +180,8 @@ impl Default for ScanOptions {
                 "demo-output".to_string(),
                 "venv".to_string(),
             ],
+            included_paths: Vec::new(),
+            excluded_paths: Vec::new(),
         }
     }
 }
@@ -213,11 +219,12 @@ pub fn scan_directory(source: &Path, options: &ScanOptions) -> Result<ScanSummar
     }
 
     let mut summary = ScanSummary::default();
-    visit_directory(source, options, &mut summary)?;
+    visit_directory(source, source, options, &mut summary)?;
     Ok(summary)
 }
 
 fn visit_directory(
+    root: &Path,
     directory: &Path,
     options: &ScanOptions,
     summary: &mut ScanSummary,
@@ -240,20 +247,42 @@ fn visit_directory(
             path: path.to_path_buf(),
             source,
         })?;
+        let relative = path.strip_prefix(root).unwrap_or(&path);
+
+        if is_excluded_path(relative, options) {
+            summary.skipped.push(SkippedEntry {
+                path,
+                reason: SkipReason::FilteredPath,
+            });
+            continue;
+        }
 
         if metadata.is_dir() {
-            if is_ignored_directory(&path, options) {
+            if !should_visit_directory(relative, options) {
+                summary.skipped.push(SkippedEntry {
+                    path,
+                    reason: SkipReason::FilteredPath,
+                });
+            } else if is_ignored_directory(&path, options) {
                 summary.skipped.push(SkippedEntry {
                     path,
                     reason: SkipReason::IgnoredDirectory,
                 });
             } else {
-                visit_directory(&path, options, summary)?;
+                visit_directory(root, &path, options, summary)?;
             }
             continue;
         }
 
         if !metadata.is_file() {
+            continue;
+        }
+
+        if !is_included_file(relative, options) {
+            summary.skipped.push(SkippedEntry {
+                path,
+                reason: SkipReason::FilteredPath,
+            });
             continue;
         }
 
@@ -293,6 +322,29 @@ fn visit_directory(
     Ok(())
 }
 
+fn should_visit_directory(relative: &Path, options: &ScanOptions) -> bool {
+    options.included_paths.is_empty()
+        || options
+            .included_paths
+            .iter()
+            .any(|included| included.starts_with(relative) || relative.starts_with(included))
+}
+
+fn is_included_file(relative: &Path, options: &ScanOptions) -> bool {
+    options.included_paths.is_empty()
+        || options
+            .included_paths
+            .iter()
+            .any(|included| relative.starts_with(included))
+}
+
+fn is_excluded_path(relative: &Path, options: &ScanOptions) -> bool {
+    options
+        .excluded_paths
+        .iter()
+        .any(|excluded| relative.starts_with(excluded))
+}
+
 fn is_ignored_directory(path: &Path, options: &ScanOptions) -> bool {
     let Some(name) = path.file_name().and_then(OsStr::to_str) else {
         return false;
@@ -327,7 +379,9 @@ fn is_contextforge_output_directory(path: &Path) -> bool {
 fn is_generated_output_file(path: &Path) -> bool {
     path.file_name()
         .and_then(OsStr::to_str)
-        .is_some_and(|name| GENERATED_OUTPUT_FILES.contains(&name))
+        .is_some_and(|name| {
+            name == crate::config::DEFAULT_CONFIG_FILE || GENERATED_OUTPUT_FILES.contains(&name)
+        })
 }
 
 fn is_binary(content: &[u8]) -> bool {

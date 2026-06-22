@@ -131,6 +131,81 @@ fn search_ignores_existing_contextforge_output_directories() {
         .stdout(predicate::str::contains("rust-final-pack").not());
 }
 
+#[test]
+fn search_skips_unreadable_documents_and_keeps_valid_results() {
+    let temp = tempdir().expect("temporary directory");
+    let root = temp.path();
+    fs::write(root.join("broken.pdf"), b"%PDF-1.4 broken document").expect("broken pdf");
+    fs::write(
+        root.join("requirements.md"),
+        "course project requirements remain searchable\n",
+    )
+    .expect("valid document");
+
+    Command::cargo_bin("contextforge")
+        .expect("contextforge binary")
+        .args(["search", "--source"])
+        .arg(root)
+        .arg("course project requirements")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("requirements.md"))
+        .stdout(predicate::str::contains("Extraction warnings: 1"))
+        .stderr(predicate::str::contains("broken.pdf"));
+}
+
+#[test]
+fn search_limits_terminal_results_and_supports_unlimited_output() {
+    let temp = tempdir().expect("temporary directory");
+    for index in 0..12 {
+        fs::write(
+            temp.path().join(format!("match-{index:02}.md")),
+            format!("ranking budget match number {index}\n"),
+        )
+        .expect("source file");
+    }
+
+    Command::cargo_bin("contextforge")
+        .expect("contextforge binary")
+        .current_dir(temp.path())
+        .args(["search", "ranking budget"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Showing 10 of 12 matches."))
+        .stdout(predicate::str::contains("match-10.md").not());
+
+    Command::cargo_bin("contextforge")
+        .expect("contextforge binary")
+        .current_dir(temp.path())
+        .args(["search", "ranking budget", "--limit", "0"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("match-10.md"))
+        .stdout(predicate::str::contains("Showing 10 of 12 matches.").not());
+}
+
+#[test]
+fn search_prints_paths_relative_to_the_source_directory() {
+    let temp = tempdir().expect("temporary directory");
+    fs::create_dir_all(temp.path().join("docs")).expect("docs directory");
+    fs::write(
+        temp.path().join("docs/requirements.md"),
+        "course project requirements\n",
+    )
+    .expect("source file");
+    let absolute_root = temp.path().display().to_string();
+
+    Command::cargo_bin("contextforge")
+        .expect("contextforge binary")
+        .current_dir(temp.path())
+        .args(["search", "course project requirements"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("docs"))
+        .stdout(predicate::str::contains("requirements.md"))
+        .stdout(predicate::str::contains(absolute_root).not());
+}
+
 fn write_simple_pdf(path: &Path, text: &str) {
     let stream = format!("BT /F1 24 Tf 100 700 Td ({text}) Tj ET");
     let objects = [

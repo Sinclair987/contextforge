@@ -62,3 +62,26 @@ fn scan_uses_contextforge_toml_when_present() {
         .stdout(predicate::str::contains("Scanned files: 0"))
         .stdout(predicate::str::contains("Too large: 1"));
 }
+
+#[test]
+fn scan_supports_repeatable_include_and_exclude_paths() {
+    let temp = tempdir().expect("temporary directory");
+    fs::create_dir_all(temp.path().join("keep/private")).expect("private directory");
+    fs::create_dir_all(temp.path().join("drop")).expect("drop directory");
+    fs::write(temp.path().join("keep/public.md"), "public context\n").expect("public file");
+    fs::write(
+        temp.path().join("keep/private/secret.md"),
+        "private context\n",
+    )
+    .expect("private file");
+    fs::write(temp.path().join("drop/other.md"), "other context\n").expect("other file");
+
+    Command::cargo_bin("contextforge")
+        .expect("contextforge binary")
+        .current_dir(temp.path())
+        .args(["scan", "--include", "keep", "--exclude", "keep/private"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Scanned files: 1"))
+        .stdout(predicate::str::contains("Filtered path:"));
+}

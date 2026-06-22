@@ -75,12 +75,13 @@ impl BudgetPlanner {
     pub fn select(self, candidates: Vec<RankedChunk>) -> BudgetPlan {
         let candidate_count = candidates.len();
         let mut selected = Vec::new();
+        let mut deferred = Vec::new();
         let mut excluded = Vec::new();
         let mut used_tokens = 0;
         let mut file_usage = BTreeMap::<PathBuf, usize>::new();
         let per_file_limit = self.policy.per_file_budget_limit();
 
-        for candidate in candidates {
+        for (index, candidate) in candidates.into_iter().enumerate() {
             let remaining = self.policy.max_tokens.saturating_sub(used_tokens);
             if candidate.token_estimate > remaining {
                 excluded.push(exclusion(
@@ -96,19 +97,36 @@ impl BudgetPlanner {
             if current_file_usage > 0
                 && current_file_usage + candidate.token_estimate > per_file_limit
             {
+                deferred.push((index, candidate, current_file_usage));
+                continue;
+            }
+
+            used_tokens += candidate.token_estimate;
+            *file_usage.entry(candidate.path.clone()).or_default() += candidate.token_estimate;
+            selected.push((index, candidate));
+        }
+
+        for (index, candidate, deferred_file_usage) in deferred {
+            let remaining = self.policy.max_tokens.saturating_sub(used_tokens);
+            if candidate.token_estimate > remaining {
                 excluded.push(exclusion(
                     candidate,
                     BudgetExclusionKind::OverPerFileBudget,
-                    current_file_usage,
+                    deferred_file_usage,
                     per_file_limit,
                 ));
                 continue;
             }
 
             used_tokens += candidate.token_estimate;
-            *file_usage.entry(candidate.path.clone()).or_default() += candidate.token_estimate;
-            selected.push(candidate);
+            selected.push((index, candidate));
         }
+
+        selected.sort_by_key(|(index, _)| *index);
+        let selected = selected
+            .into_iter()
+            .map(|(_, candidate)| candidate)
+            .collect();
 
         BudgetPlan {
             policy: self.policy,
@@ -156,7 +174,7 @@ mod tests {
         let chunks = vec![
             ranked("docs/a.md", 20, 30),
             ranked("docs/a.md", 18, 25),
-            ranked("docs/a.md", 16, 24),
+            ranked("docs/a.md", 16, 30),
             ranked("docs/b.md", 14, 20),
         ];
         let planner = BudgetPlanner::new(BudgetPolicy::new(100));
@@ -167,6 +185,22 @@ mod tests {
         assert_eq!(plan.selected.len(), 3);
         assert_eq!(plan.excluded.len(), 1);
         assert!(plan.excluded[0].reason.contains("per-file budget limit"));
+    }
+
+    #[test]
+    fn select_fills_unused_budget_from_one_relevant_file() {
+        let chunks = vec![
+            ranked("docs/a.md", 20, 30),
+            ranked("docs/a.md", 18, 25),
+            ranked("docs/a.md", 16, 24),
+        ];
+        let planner = BudgetPlanner::new(BudgetPolicy::new(100));
+
+        let plan = planner.select(chunks);
+
+        assert_eq!(plan.used_tokens, 79);
+        assert_eq!(plan.selected.len(), 3);
+        assert!(plan.excluded.is_empty());
     }
 
     fn ranked(path: &str, score: usize, tokens: usize) -> RankedChunk {

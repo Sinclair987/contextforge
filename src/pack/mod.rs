@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
 };
@@ -7,11 +7,12 @@ use std::{
 use serde::Serialize;
 
 use crate::{
-    audit::{audit_directory_with_options, PrivacyFinding, Severity},
+    audit::{PrivacyFinding, Severity},
     budget::{BudgetExclusion, BudgetPlanner, BudgetPolicy},
-    chunk::ChunkKind,
+    chunk::{estimate_tokens, ChunkKind},
     config::OutputConfigValues,
-    rank::{RankedChunk, ScoreBreakdown},
+    corpus::{load_corpus, ExtractionIssue},
+    rank::{rank_chunks, QueryTerms, RankedChunk, ScoreBreakdown},
     scanner::ScanOptions,
     ContextForgeError, Result,
 };
@@ -81,6 +82,8 @@ pub struct PackResult {
     pub selected_chunks: Vec<PackedChunk>,
     pub excluded_chunks: Vec<BudgetExclusion>,
     pub privacy_findings: Vec<PrivacyFinding>,
+    pub selected_privacy_findings: Vec<PrivacyFinding>,
+    pub extraction_issues: Vec<ExtractionIssue>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -112,19 +115,51 @@ struct PackManifest<'a> {
     selected_chunk_types: BTreeMap<String, usize>,
     privacy_severity_counts: BTreeMap<String, usize>,
     privacy_kind_counts: BTreeMap<String, usize>,
-    selected_chunks: &'a [PackedChunk],
-    excluded_chunks: &'a [BudgetExclusion],
+    selected_chunks: Vec<ManifestSelectedChunk<'a>>,
+    excluded_chunks_total: usize,
+    excluded_chunks: Vec<ManifestExcludedChunk<'a>>,
+    privacy_findings_total: usize,
     privacy_findings: Vec<ManifestPrivacyFinding>,
-    excluded_files: Vec<String>,
+    selected_privacy_findings: Vec<ManifestPrivacyFinding>,
+    extraction_issues: Vec<ManifestExtractionIssue<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+struct ManifestSelectedChunk<'a> {
+    path: String,
+    kind: &'static str,
+    title: Option<&'a str>,
+    start_line: usize,
+    end_line: usize,
+    score: usize,
+    token_estimate: usize,
+    score_breakdown: &'a ScoreBreakdown,
+    redacted: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ManifestExcludedChunk<'a> {
+    path: String,
+    start_line: usize,
+    end_line: usize,
+    score: usize,
+    token_estimate: usize,
+    reason: &'a str,
 }
 
 #[derive(Debug, Serialize)]
 struct ManifestPrivacyFinding {
-    path: PathBuf,
+    path: String,
     line: usize,
     kind: String,
     severity: String,
     evidence: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ManifestExtractionIssue<'a> {
+    path: String,
+    message: &'a str,
 }
 
 struct RenderContext<'a> {
@@ -141,11 +176,20 @@ struct RenderContext<'a> {
     chunks: &'a [PackedChunk],
     excluded_chunks: &'a [BudgetExclusion],
     findings: &'a [PrivacyFinding],
+    selected_findings: &'a [PrivacyFinding],
+    extraction_issues: &'a [ExtractionIssue],
 }
 
 struct BundleGroup<'a> {
     path: String,
     chunks: Vec<&'a PackedChunk>,
+}
+
+struct BundleSpan {
+    start_line: usize,
+    end_line: usize,
+    text: String,
+    redacted: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -171,16 +215,57 @@ pub fn pack_directory_with_options(
     output_dir: &Path,
     options: PackOptions,
 ) -> Result<PackResult> {
-    let scan_options = pack_scan_options(source, output_dir, &options.scan_options);
-    let ranked_chunks = crate::rank::rank_directory_with_options(source, goal, &scan_options)?;
-    let candidate_count = ranked_chunks.len();
-    let budget_policy = BudgetPolicy::new(budget);
-    let budget_plan = BudgetPlanner::new(budget_policy).select(ranked_chunks);
-    let privacy_findings = audit_directory_with_options(source, &scan_options)?;
-    validate_privacy_gate(&privacy_findings, options.fail_on)?;
+    let goal = goal.trim();
+    if goal.is_empty() {
+        return Err(ContextForgeError::InvalidGoal);
+    }
+    if budget == 0 {
+        return Err(ContextForgeError::InvalidBudget);
+    }
 
-    let used_tokens = budget_plan.used_tokens;
-    let remaining_tokens = budget_plan.remaining_tokens;
+    let fixed_overhead = bundle_fixed_overhead(goal);
+    if budget <= fixed_overhead {
+        return Err(ContextForgeError::BudgetTooSmall {
+            minimum: fixed_overhead + 1,
+        });
+    }
+
+    let scan_options = pack_scan_options(source, output_dir, &options.scan_options);
+    let corpus = load_corpus(source, &scan_options)?;
+    let terms = QueryTerms::parse(goal);
+    let ranked_chunks = rank_chunks(corpus.chunks, &terms);
+    if ranked_chunks.is_empty() {
+        return Err(ContextForgeError::NoMatchingContext {
+            goal: goal.to_string(),
+        });
+    }
+
+    let candidate_count = ranked_chunks.len();
+    let (mut ranked_chunks, relevance_exclusions) = apply_relevance_floor(ranked_chunks);
+    add_rendering_costs(source, &mut ranked_chunks);
+    let minimum_bundle_budget = fixed_overhead
+        + ranked_chunks
+            .iter()
+            .map(|chunk| chunk.token_estimate)
+            .min()
+            .unwrap_or(1);
+    let budget_policy = BudgetPolicy::new(budget - fixed_overhead);
+    let mut budget_plan = BudgetPlanner::new(budget_policy).select(ranked_chunks);
+    budget_plan.excluded.extend(relevance_exclusions);
+    let privacy_findings = corpus.privacy_findings;
+    let extraction_issues = corpus.extraction_issues;
+    if budget_plan.selected.is_empty() {
+        return Err(ContextForgeError::BudgetTooSmall {
+            minimum: minimum_bundle_budget,
+        });
+    }
+
+    let selected_privacy_findings =
+        selected_privacy_findings(&privacy_findings, &budget_plan.selected);
+    validate_privacy_gate(&selected_privacy_findings, options.fail_on)?;
+
+    let used_tokens = fixed_overhead + budget_plan.used_tokens;
+    let remaining_tokens = budget.saturating_sub(used_tokens);
     let selected_chunks = budget_plan
         .selected
         .into_iter()
@@ -189,7 +274,7 @@ pub fn pack_directory_with_options(
     let redaction_enabled = options.redact;
     let redacted = selected_chunks.iter().any(|chunk| chunk.redacted);
     let excluded_chunks = budget_plan.excluded;
-    let statistics = build_statistics(&selected_chunks, &privacy_findings);
+    let statistics = build_statistics(&selected_chunks, &selected_privacy_findings);
 
     let bundle_path = output_dir.join(&options.file_names.bundle);
     let manifest_path = output_dir.join(&options.file_names.manifest);
@@ -215,6 +300,8 @@ pub fn pack_directory_with_options(
             chunks: &selected_chunks,
             excluded_chunks: &excluded_chunks,
             findings: &privacy_findings,
+            selected_findings: &selected_privacy_findings,
+            extraction_issues: &extraction_issues,
         };
 
         write_output(&bundle_path, &render_bundle(&render_context))?;
@@ -234,7 +321,102 @@ pub fn pack_directory_with_options(
         selected_chunks,
         excluded_chunks,
         privacy_findings,
+        selected_privacy_findings,
+        extraction_issues,
     })
+}
+
+fn selected_privacy_findings(
+    findings: &[PrivacyFinding],
+    chunks: &[RankedChunk],
+) -> Vec<PrivacyFinding> {
+    findings
+        .iter()
+        .filter(|finding| {
+            chunks.iter().any(|chunk| {
+                chunk.path == finding.path
+                    && (chunk.start_line..=chunk.end_line).contains(&finding.line)
+            })
+        })
+        .cloned()
+        .collect()
+}
+
+fn bundle_fixed_overhead(goal: &str) -> usize {
+    estimate_tokens(&format!(
+        "# Context Bundle\n\n## Goal\n\n{goal}\n\n## Selected Context\n\n"
+    ))
+}
+
+fn add_rendering_costs(source: &Path, chunks: &mut [RankedChunk]) {
+    for chunk in chunks {
+        let label = format!(
+            "### {}\n\nLines {}-{}\n\n",
+            display_source_path(source, &chunk.path),
+            chunk.start_line,
+            chunk.end_line
+        );
+        chunk.token_estimate += estimate_tokens(&label);
+    }
+}
+
+fn apply_relevance_floor(
+    ranked_chunks: Vec<RankedChunk>,
+) -> (Vec<RankedChunk>, Vec<BudgetExclusion>) {
+    let file_minimum_score = ranked_chunks
+        .first()
+        .map(|chunk| chunk.score.div_ceil(4))
+        .unwrap_or_default();
+    let dominant_file_score = ranked_chunks
+        .first()
+        .map(|chunk| chunk.score.div_ceil(2))
+        .unwrap_or_default();
+    let mut file_signals = BTreeMap::<PathBuf, (usize, bool)>::new();
+    for chunk in &ranked_chunks {
+        let metadata_match = chunk.score_breakdown.path_match_score > 0
+            || chunk.score_breakdown.title_match_score > 0
+            || chunk.score_breakdown.file_name_match_score > 0;
+        file_signals
+            .entry(chunk.path.clone())
+            .and_modify(|(score, matched)| {
+                if chunk.score > *score {
+                    *score = chunk.score;
+                    *matched = metadata_match;
+                } else if chunk.score == *score {
+                    *matched |= metadata_match;
+                }
+            })
+            .or_insert((chunk.score, metadata_match));
+    }
+    let mut included = Vec::new();
+    let mut excluded = Vec::new();
+
+    for chunk in ranked_chunks {
+        let (strongest_file_score, metadata_match) =
+            file_signals.get(&chunk.path).copied().unwrap_or_default();
+        let local_minimum_score = strongest_file_score.div_ceil(10);
+        let trusted_file = strongest_file_score >= file_minimum_score
+            && (metadata_match || strongest_file_score >= dominant_file_score);
+        if trusted_file && chunk.score >= local_minimum_score {
+            included.push(chunk);
+            continue;
+        }
+
+        excluded.push(BudgetExclusion {
+            path: chunk.path,
+            start_line: chunk.start_line,
+            end_line: chunk.end_line,
+            score: chunk.score,
+            token_estimate: chunk.token_estimate,
+            preview: chunk.preview,
+            reason: format!(
+                "automatic relevance floor: score {}, file best {strongest_file_score}, file minimum {file_minimum_score}, dominant minimum {dominant_file_score}, metadata match {metadata_match}, local minimum {local_minimum_score}",
+                chunk.score,
+            ),
+        });
+    }
+
+    (included, excluded)
 }
 
 fn pack_chunk(chunk: RankedChunk, findings: &[PrivacyFinding], redact: bool) -> PackedChunk {
@@ -282,16 +464,43 @@ fn render_bundle(context: &RenderContext<'_>) -> String {
     } else {
         for group in bundle_groups(context.source, context.chunks) {
             output.push_str(&format!("### {}\n\n", group.path));
-            for chunk in group.chunks {
+            for span in bundle_spans(&group.chunks) {
                 output.push_str(&format!(
                     "Lines {}-{}\n\n{}\n\n",
-                    chunk.start_line, chunk.end_line, chunk.text
+                    span.start_line, span.end_line, span.text
                 ));
             }
         }
     }
 
     output
+}
+
+fn bundle_spans(chunks: &[&PackedChunk]) -> Vec<BundleSpan> {
+    let mut spans = Vec::<BundleSpan>::new();
+
+    for chunk in chunks {
+        if let Some(span) = spans.last_mut() {
+            if chunk.start_line > span.end_line
+                && chunk.start_line <= span.end_line.saturating_add(2)
+            {
+                span.end_line = span.end_line.max(chunk.end_line);
+                span.text.push_str("\n\n");
+                span.text.push_str(&chunk.text);
+                span.redacted |= chunk.redacted;
+                continue;
+            }
+        }
+
+        spans.push(BundleSpan {
+            start_line: chunk.start_line,
+            end_line: chunk.end_line,
+            text: chunk.text.clone(),
+            redacted: chunk.redacted,
+        });
+    }
+
+    spans
 }
 
 fn bundle_groups<'a>(source: &Path, chunks: &'a [PackedChunk]) -> Vec<BundleGroup<'a>> {
@@ -320,6 +529,7 @@ fn bundle_groups<'a>(source: &Path, chunks: &'a [PackedChunk]) -> Vec<BundleGrou
 }
 
 fn render_manifest(context: &RenderContext<'_>) -> Result<String> {
+    const DETAIL_LIMIT: usize = 50;
     let manifest = PackManifest {
         goal: context.goal,
         budget: context.budget,
@@ -332,20 +542,67 @@ fn render_manifest(context: &RenderContext<'_>) -> Result<String> {
         selected_chunk_types: context.statistics.selected_chunk_types.clone(),
         privacy_severity_counts: context.statistics.privacy_severity_counts.clone(),
         privacy_kind_counts: context.statistics.privacy_kind_counts.clone(),
-        selected_chunks: context.chunks,
-        excluded_chunks: context.excluded_chunks,
+        selected_chunks: context
+            .chunks
+            .iter()
+            .map(|chunk| ManifestSelectedChunk {
+                path: crate::paths::relative_display(context.source, &chunk.path),
+                kind: chunk.kind.label(),
+                title: chunk.title.as_deref(),
+                start_line: chunk.start_line,
+                end_line: chunk.end_line,
+                score: chunk.score,
+                token_estimate: chunk.token_estimate,
+                score_breakdown: &chunk.score_breakdown,
+                redacted: chunk.redacted,
+            })
+            .collect(),
+        excluded_chunks_total: context.excluded_chunks.len(),
+        excluded_chunks: context
+            .excluded_chunks
+            .iter()
+            .take(DETAIL_LIMIT)
+            .map(|chunk| ManifestExcludedChunk {
+                path: crate::paths::relative_display(context.source, &chunk.path),
+                start_line: chunk.start_line,
+                end_line: chunk.end_line,
+                score: chunk.score,
+                token_estimate: chunk.token_estimate,
+                reason: &chunk.reason,
+            })
+            .collect(),
+        privacy_findings_total: context.findings.len(),
         privacy_findings: context
             .findings
             .iter()
+            .take(DETAIL_LIMIT)
             .map(|finding| ManifestPrivacyFinding {
-                path: finding.path.clone(),
+                path: crate::paths::relative_display(context.source, &finding.path),
                 line: finding.line,
                 kind: finding.kind.label().to_string(),
                 severity: finding.severity.label().to_string(),
                 evidence: finding.evidence.clone(),
             })
             .collect(),
-        excluded_files: excluded_files(context.excluded_chunks),
+        selected_privacy_findings: context
+            .selected_findings
+            .iter()
+            .map(|finding| ManifestPrivacyFinding {
+                path: crate::paths::relative_display(context.source, &finding.path),
+                line: finding.line,
+                kind: finding.kind.label().to_string(),
+                severity: finding.severity.label().to_string(),
+                evidence: finding.evidence.clone(),
+            })
+            .collect(),
+        extraction_issues: context
+            .extraction_issues
+            .iter()
+            .map(|issue| ManifestExtractionIssue {
+                path: crate::paths::relative_display(context.source, &issue.path),
+                message: &issue.message,
+            })
+            .collect(),
     };
 
     serde_json::to_string_pretty(&manifest)
@@ -353,19 +610,28 @@ fn render_manifest(context: &RenderContext<'_>) -> Result<String> {
 }
 
 fn render_report(context: &RenderContext<'_>) -> String {
+    let groups = bundle_groups(context.source, context.chunks);
+    let selected_files = groups.len();
+    let spans = groups
+        .iter()
+        .flat_map(|group| bundle_spans(&group.chunks))
+        .collect::<Vec<_>>();
+    let selected_spans = spans.len();
+    let redacted_spans = spans.iter().filter(|span| span.redacted).count();
     format!(
-        "# ContextForge Report\n\n- Goal: {goal}\n- Budget: {budget}\n- Used tokens: {used_tokens}\n- Remaining tokens: {remaining_tokens}\n- Per-file budget limit: {}\n- Candidate chunks: {candidate_count}\n- Selected chunks: {}\n- Excluded chunks: {}\n- Privacy findings: {}\n- Redaction: {}\n- Redacted chunks: {}\n\n## Selected chunk types\n\n{}\n## Privacy severity counts\n\n{}\n## Privacy finding types\n\n{}",
+        "# ContextForge Report\n\n- Goal: {goal}\n- Budget: {budget}\n- Used tokens: {used_tokens}\n- Remaining tokens: {remaining_tokens}\n- Per-file budget limit: {}\n- Candidate chunks: {candidate_count}\n- Selected files: {selected_files}\n- Selected spans: {}\n- Excluded chunks: {}\n- Selected privacy findings: {}\n- Source privacy findings: {}\n- Extraction warnings: {}\n- Redaction: {}\n- Redacted spans: {}\n\n## Selected privacy severity counts\n\n{}\n## Selected privacy finding types\n\n{}",
         context.budget_policy.per_file_budget_limit(),
-        context.chunks.len(),
+        selected_spans,
         context.excluded_chunks.len(),
+        context.selected_findings.len(),
         context.findings.len(),
+        context.extraction_issues.len(),
         if context.redaction_enabled {
             "enabled"
         } else {
             "disabled"
         },
-        context.chunks.iter().filter(|chunk| chunk.redacted).count(),
-        render_counts(&context.statistics.selected_chunk_types),
+        redacted_spans,
         render_counts(&context.statistics.privacy_severity_counts),
         render_counts(&context.statistics.privacy_kind_counts),
         goal = context.goal,
@@ -420,15 +686,6 @@ fn write_output(path: &Path, content: &str) -> Result<()> {
     })
 }
 
-fn excluded_files(excluded_chunks: &[BudgetExclusion]) -> Vec<String> {
-    excluded_chunks
-        .iter()
-        .map(|chunk| format!("{}: {}", chunk.path.display(), chunk.reason))
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
-}
-
 fn validate_privacy_gate(findings: &[PrivacyFinding], threshold: Option<Severity>) -> Result<()> {
     let Some(threshold) = threshold else {
         return Ok(());
@@ -481,8 +738,8 @@ fn preview(text: &str) -> String {
 
 fn pack_scan_options(source: &Path, output_dir: &Path, base_options: &ScanOptions) -> ScanOptions {
     let mut scan_options = base_options.clone();
-    let source = absolute_path(source);
-    let output_dir = absolute_path(output_dir);
+    let source = crate::paths::absolute(source);
+    let output_dir = crate::paths::absolute(output_dir);
 
     if output_dir != source && output_dir.starts_with(&source) {
         if let Some(name) = output_dir.file_name().and_then(|name| name.to_str()) {
@@ -496,28 +753,14 @@ fn pack_scan_options(source: &Path, output_dir: &Path, base_options: &ScanOption
     scan_options
 }
 
-fn absolute_path(path: &Path) -> PathBuf {
-    if path.is_absolute() {
-        return path.to_path_buf();
-    }
-
-    std::env::current_dir()
-        .map(|current_dir| current_dir.join(path))
-        .unwrap_or_else(|_| path.to_path_buf())
-}
-
 fn display_source_path(source: &Path, path: &Path) -> String {
-    let source = absolute_path(source);
-    let path = absolute_path(path);
-    path.strip_prefix(&source)
-        .unwrap_or(&path)
-        .display()
-        .to_string()
+    crate::paths::relative_display(source, path)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rank::ScoreBreakdown;
     use std::fs;
     use tempfile::tempdir;
 
@@ -559,5 +802,91 @@ mod tests {
             .selected_chunks
             .iter()
             .any(|chunk| chunk.path.ends_with("requirements.md")));
+    }
+
+    #[test]
+    fn relevance_floor_keeps_supporting_chunks_from_a_strong_file() {
+        let chunks = vec![
+            ranked_chunk("docs/strong.md", 100),
+            ranked_chunk("docs/strong.md", 20),
+            ranked_chunk("docs/weak.md", 20),
+        ];
+
+        let (included, excluded) = apply_relevance_floor(chunks);
+
+        assert_eq!(included.len(), 2);
+        assert!(included
+            .iter()
+            .all(|chunk| chunk.path.ends_with("strong.md")));
+        assert_eq!(excluded.len(), 1);
+        assert!(excluded[0].path.ends_with("weak.md"));
+    }
+
+    #[test]
+    fn relevance_floor_keeps_metadata_anchor_and_rejects_lexical_noise() {
+        let mut anchored = ranked_chunk("docs/anchored.md", 40);
+        anchored.score_breakdown.title_match_score = 4;
+        let chunks = vec![
+            ranked_chunk("docs/top.md", 100),
+            anchored,
+            ranked_chunk("labs/noise.md", 40),
+        ];
+
+        let (included, excluded) = apply_relevance_floor(chunks);
+
+        assert_eq!(included.len(), 2);
+        assert!(included.iter().any(|chunk| chunk.path.ends_with("top.md")));
+        assert!(included
+            .iter()
+            .any(|chunk| chunk.path.ends_with("anchored.md")));
+        assert_eq!(excluded.len(), 1);
+        assert!(excluded[0].path.ends_with("noise.md"));
+    }
+
+    #[test]
+    fn relevance_floor_does_not_promote_file_from_weaker_title_match() {
+        let mut weak_title = ranked_chunk("labs/noise.md", 20);
+        weak_title.score_breakdown.title_match_score = 4;
+        let chunks = vec![
+            ranked_chunk("docs/top.md", 100),
+            ranked_chunk("labs/noise.md", 40),
+            weak_title,
+        ];
+
+        let (included, excluded) = apply_relevance_floor(chunks);
+
+        assert_eq!(included.len(), 1);
+        assert!(included[0].path.ends_with("top.md"));
+        assert_eq!(excluded.len(), 2);
+        assert!(excluded
+            .iter()
+            .all(|chunk| chunk.path.ends_with("noise.md")));
+    }
+
+    fn ranked_chunk(path: &str, score: usize) -> RankedChunk {
+        RankedChunk {
+            path: PathBuf::from(path),
+            kind: ChunkKind::Paragraph,
+            title: None,
+            start_line: 1,
+            end_line: 1,
+            score,
+            token_estimate: 10,
+            text: "course project requirements".to_string(),
+            preview: "course project requirements".to_string(),
+            score_breakdown: ScoreBreakdown {
+                lexical_score: score,
+                text_match_score: 0,
+                term_coverage_score: 0,
+                full_coverage_score: 0,
+                path_match_score: 0,
+                title_match_score: 0,
+                file_name_match_score: 0,
+                file_kind_score: 0,
+                density_score: 0,
+                total_score: score,
+                reasons: Vec::new(),
+            },
+        }
     }
 }

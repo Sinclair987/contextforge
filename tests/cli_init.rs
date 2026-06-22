@@ -40,3 +40,19 @@ fn init_refuses_to_overwrite_existing_config() {
     let content = fs::read_to_string(config_path).expect("existing config file");
     assert_eq!(content, "existing = true\n");
 }
+
+#[test]
+fn init_can_create_config_in_another_source_directory() {
+    let temp = tempdir().expect("temporary directory");
+    let source = temp.path().join("source");
+    fs::create_dir_all(&source).expect("source directory");
+
+    Command::cargo_bin("contextforge")
+        .expect("contextforge binary")
+        .args(["init", "--source"])
+        .arg(&source)
+        .assert()
+        .success();
+
+    assert!(source.join("contextforge.toml").exists());
+}
