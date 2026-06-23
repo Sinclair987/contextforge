@@ -1,11 +1,12 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
+use serde_json::Value;
 use std::{fs, io::Write, path::Path};
 use tempfile::tempdir;
 use zip::{write::SimpleFileOptions, ZipWriter};
 
 #[test]
-fn search_returns_relevant_file_path_line_score_and_preview() {
+fn search_returns_readable_results_without_internal_ranking_details() {
     let temp = tempdir().expect("temporary directory");
     let root = temp.path();
 
@@ -24,16 +25,121 @@ fn search_returns_relevant_file_path_line_score_and_preview() {
         .arg("ownership borrowing")
         .assert()
         .success()
+        .stdout(predicate::str::contains("Search: ownership borrowing"))
         .stdout(predicate::str::contains(
-            "Search results for: ownership borrowing",
+            "1 passage in 1 file; showing 1 passage from 1 file",
         ))
         .stdout(predicate::str::contains("rust.md"))
-        .stdout(predicate::str::contains("lines 1-2"))
-        .stdout(predicate::str::contains("markdown section"))
-        .stdout(predicate::str::contains("title: Ownership"))
-        .stdout(predicate::str::contains("score"))
+        .stdout(predicate::str::contains("Lines 1-2 · Ownership"))
         .stdout(predicate::str::contains("Rust ownership and borrowing"))
+        .stdout(predicate::str::contains("reason:").not())
+        .stdout(predicate::str::contains("score").not())
+        .stdout(predicate::str::contains("paragraph").not())
+        .stdout(predicate::str::contains("markdown section").not())
+        .stdout(predicate::str::contains("title:").not())
         .stdout(predicate::str::contains("notes.txt").not());
+}
+
+#[test]
+fn search_explain_restores_opt_in_ranking_diagnostics() {
+    let temp = tempdir().expect("temporary directory");
+    fs::write(
+        temp.path().join("notes.md"),
+        "# Knowledge\nindexed local knowledge\n",
+    )
+    .expect("source file");
+
+    Command::cargo_bin("contextforge")
+        .expect("contextforge binary")
+        .current_dir(temp.path())
+        .args(["search", "local knowledge", "--explain"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Score"))
+        .stdout(predicate::str::contains("Reason:"))
+        .stdout(predicate::str::contains("markdown section"));
+}
+
+#[test]
+fn search_exact_excludes_scattered_chinese_terms() {
+    let temp = tempdir().expect("temporary directory");
+    fs::write(temp.path().join("exact.md"), "齐泽克的哲学研究\n").expect("exact file");
+    fs::write(
+        temp.path().join("scattered.md"),
+        "整齐的方法，泽被后世，克服困难\n",
+    )
+    .expect("scattered file");
+
+    Command::cargo_bin("contextforge")
+        .expect("contextforge binary")
+        .current_dir(temp.path())
+        .args(["search", "齐泽克", "--exact"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("exact.md"))
+        .stdout(predicate::str::contains("scattered.md").not());
+}
+
+#[test]
+fn search_type_filters_supported_format_groups() {
+    let temp = tempdir().expect("temporary directory");
+    fs::write(temp.path().join("notes.md"), "shared knowledge\n").expect("markdown file");
+    fs::write(temp.path().join("module.rs"), "fn shared_knowledge() {}\n").expect("Rust file");
+
+    Command::cargo_bin("contextforge")
+        .expect("contextforge binary")
+        .current_dir(temp.path())
+        .args(["search", "shared knowledge", "--type", "markdown"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("notes.md"))
+        .stdout(predicate::str::contains("module.rs").not());
+}
+
+#[test]
+fn search_per_file_limit_diversifies_grouped_results() {
+    let temp = tempdir().expect("temporary directory");
+    fs::write(
+        temp.path().join("a.md"),
+        "# One\nshared knowledge one\n# Two\nshared knowledge two\n# Three\nshared knowledge three\n",
+    )
+    .expect("multi-section file");
+    fs::write(temp.path().join("b.md"), "shared knowledge from b\n").expect("second file");
+
+    Command::cargo_bin("contextforge")
+        .expect("contextforge binary")
+        .current_dir(temp.path())
+        .args([
+            "search",
+            "shared knowledge",
+            "--limit",
+            "3",
+            "--per-file",
+            "1",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("showing 2 passages from 2 files"));
+}
+
+#[test]
+fn search_json_emits_structured_groups_without_default_diagnostics() {
+    let temp = tempdir().expect("temporary directory");
+    fs::write(temp.path().join("notes.md"), "structured local knowledge\n").expect("source file");
+
+    let output = Command::cargo_bin("contextforge")
+        .expect("contextforge binary")
+        .current_dir(temp.path())
+        .args(["search", "local knowledge", "--format", "json"])
+        .output()
+        .expect("search output");
+    assert!(output.status.success());
+    let value: Value = serde_json::from_slice(&output.stdout).expect("JSON search result");
+
+    assert_eq!(value["query"], "local knowledge");
+    assert_eq!(value["total_passages"], 1);
+    assert_eq!(value["groups"][0]["path"], "notes.md");
+    assert!(value["groups"][0]["hits"][0].get("score").is_none());
 }
 
 #[test]
@@ -111,9 +217,7 @@ fn search_can_read_common_data_markup_and_code_formats() {
         .stdout(predicate::str::contains("settings.yaml"))
         .stdout(predicate::str::contains("data.csv"))
         .stdout(predicate::str::contains("page.html"))
-        .stdout(predicate::str::contains("build.py"))
-        .stdout(predicate::str::contains("code item"))
-        .stdout(predicate::str::contains("table rows"));
+        .stdout(predicate::str::contains("build.py"));
 }
 
 #[test]
@@ -168,9 +272,12 @@ fn search_skips_unreadable_documents_and_keeps_valid_results() {
         .assert()
         .success()
         .stdout(predicate::str::contains("requirements.md"))
-        .stdout(predicate::str::contains("Extraction warnings: 2"))
-        .stderr(predicate::str::contains("broken.pdf"))
-        .stderr(predicate::str::contains("broken.epub"));
+        .stdout(predicate::str::contains(
+            "Skipped 2 files that could not be indexed.",
+        ))
+        .stdout(predicate::str::contains("broken.pdf").not())
+        .stdout(predicate::str::contains("broken.epub").not())
+        .stderr(predicate::str::is_empty());
 }
 
 #[test]
@@ -190,7 +297,9 @@ fn search_limits_terminal_results_and_supports_unlimited_output() {
         .args(["search", "ranking budget"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Showing 10 of 12 matches."))
+        .stdout(predicate::str::contains(
+            "12 passages in 12 files; showing 10 passages from 10 files",
+        ))
         .stdout(predicate::str::contains("match-10.md").not());
 
     Command::cargo_bin("contextforge")
@@ -200,7 +309,9 @@ fn search_limits_terminal_results_and_supports_unlimited_output() {
         .assert()
         .success()
         .stdout(predicate::str::contains("match-10.md"))
-        .stdout(predicate::str::contains("Showing 10 of 12 matches.").not());
+        .stdout(predicate::str::contains(
+            "12 passages in 12 files; showing 12 passages from 12 files",
+        ));
 }
 
 #[test]

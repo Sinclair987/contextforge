@@ -12,7 +12,7 @@ use serde::Serialize;
 use crate::{
     audit::{audit_text, PrivacyFinding},
     chunk::{split_document, Chunk},
-    extract::{Document, Extractor, TextExtractor},
+    extract::{Extractor, TextExtractor},
     scanner::{scan_directory, FileInfo, FileKind, ScanOptions, ScanSummary},
     Result,
 };
@@ -33,46 +33,25 @@ pub struct Corpus {
 
 const MAX_PDF_WORKERS: usize = 3;
 
-enum ExtractionOutcome {
-    Document(Document),
-    Issue(ExtractionIssue),
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExtractedFile {
+    pub file: FileInfo,
+    pub chunks: Vec<Chunk>,
+    pub privacy_findings: Vec<PrivacyFinding>,
+    pub issue: Option<ExtractionIssue>,
 }
 
 pub fn load_corpus(source: &std::path::Path, options: &ScanOptions) -> Result<Corpus> {
     let scan = scan_directory(source, options)?;
-    let extractor = TextExtractor::new(options.pdf_timeout_seconds);
     let mut chunks = Vec::new();
     let mut privacy_findings = Vec::new();
     let mut extraction_issues = Vec::new();
 
-    let mut outcomes = Vec::new();
-    let mut pdf_files = Vec::new();
-    for (index, file) in scan.files.iter().enumerate() {
-        if !extractor.supports(file) {
-            continue;
-        }
-
-        if file.kind == FileKind::Pdf {
-            pdf_files.push((index, file));
-        } else {
-            outcomes.push((index, extract_file(&extractor, file)));
-        }
-    }
-
-    outcomes.extend(bounded_parallel_map(
-        &pdf_files,
-        pdf_worker_limit(),
-        |(index, file)| (*index, extract_file(&extractor, file)),
-    ));
-    outcomes.sort_by_key(|(index, _)| *index);
-
-    for (_, outcome) in outcomes {
-        match outcome {
-            ExtractionOutcome::Document(document) => {
-                privacy_findings.extend(audit_text(&document.path, &document.text));
-                chunks.extend(split_document(&document));
-            }
-            ExtractionOutcome::Issue(issue) => extraction_issues.push(issue),
+    for extracted in extract_files(&scan.files, options.pdf_timeout_seconds) {
+        chunks.extend(extracted.chunks);
+        privacy_findings.extend(extracted.privacy_findings);
+        if let Some(issue) = extracted.issue {
+            extraction_issues.push(issue);
         }
     }
 
@@ -91,19 +70,59 @@ pub fn load_corpus(source: &std::path::Path, options: &ScanOptions) -> Result<Co
     })
 }
 
+pub(crate) fn extract_files(files: &[FileInfo], pdf_timeout_seconds: u64) -> Vec<ExtractedFile> {
+    let extractor = TextExtractor::new(pdf_timeout_seconds);
+    let mut outcomes = Vec::new();
+    let mut pdf_files = Vec::new();
+    for (index, file) in files.iter().enumerate() {
+        if file.kind == FileKind::Pdf {
+            pdf_files.push((index, file));
+        } else {
+            outcomes.push((index, extract_file(&extractor, file)));
+        }
+    }
+
+    outcomes.extend(bounded_parallel_map(
+        &pdf_files,
+        pdf_worker_limit(),
+        |(index, file)| (*index, extract_file(&extractor, file)),
+    ));
+    outcomes.sort_by_key(|(index, _)| *index);
+    outcomes.into_iter().map(|(_, outcome)| outcome).collect()
+}
+
 fn pdf_worker_limit() -> usize {
     thread::available_parallelism()
         .map_or(1, usize::from)
         .min(MAX_PDF_WORKERS)
 }
 
-fn extract_file(extractor: &TextExtractor, file: &FileInfo) -> ExtractionOutcome {
+fn extract_file(extractor: &TextExtractor, file: &FileInfo) -> ExtractedFile {
+    if !extractor.supports(file) {
+        return ExtractedFile {
+            file: file.clone(),
+            chunks: Vec::new(),
+            privacy_findings: Vec::new(),
+            issue: None,
+        };
+    }
+
     match extractor.extract(file) {
-        Ok(document) => ExtractionOutcome::Document(document),
-        Err(error) => ExtractionOutcome::Issue(ExtractionIssue {
-            path: file.path.clone(),
-            message: error.to_string(),
-        }),
+        Ok(document) => ExtractedFile {
+            file: file.clone(),
+            chunks: split_document(&document),
+            privacy_findings: audit_text(&document.path, &document.text),
+            issue: None,
+        },
+        Err(error) => ExtractedFile {
+            file: file.clone(),
+            chunks: Vec::new(),
+            privacy_findings: Vec::new(),
+            issue: Some(ExtractionIssue {
+                path: file.path.clone(),
+                message: error.to_string(),
+            }),
+        },
     }
 }
 

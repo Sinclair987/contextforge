@@ -40,6 +40,111 @@ impl QueryTerms {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QueryDocumentStats {
+    frequencies: Vec<usize>,
+    document_len: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum QueryTermKind {
+    Cjk(Vec<char>),
+    Word,
+}
+
+struct QueryMatcher<'a> {
+    terms: &'a QueryTerms,
+    kinds: Vec<QueryTermKind>,
+}
+
+impl<'a> QueryMatcher<'a> {
+    fn new(terms: &'a QueryTerms) -> Self {
+        let kinds = terms
+            .as_slice()
+            .iter()
+            .map(|term| {
+                let chars = term.chars().collect::<Vec<_>>();
+                if chars.iter().all(|ch| is_cjk(*ch)) {
+                    QueryTermKind::Cjk(chars)
+                } else {
+                    QueryTermKind::Word
+                }
+            })
+            .collect();
+        Self { terms, kinds }
+    }
+
+    fn document_stats(&self, text: &str) -> QueryDocumentStats {
+        let mut stats = QueryDocumentStats {
+            frequencies: vec![0; self.terms.as_slice().len()],
+            document_len: 0,
+        };
+        let mut current = String::new();
+        let mut current_class = None;
+
+        for ch in text.chars() {
+            for lower in normalize_char(ch).to_lowercase() {
+                let Some(class) = token_class(lower) else {
+                    self.flush_run(&mut current, current_class, &mut stats);
+                    current_class = None;
+                    continue;
+                };
+                if current_class.is_some_and(|active| active != class) {
+                    self.flush_run(&mut current, current_class, &mut stats);
+                }
+                current.push(lower);
+                current_class = Some(class);
+            }
+        }
+        self.flush_run(&mut current, current_class, &mut stats);
+        stats
+    }
+
+    fn flush_run(
+        &self,
+        current: &mut String,
+        class: Option<TokenClass>,
+        stats: &mut QueryDocumentStats,
+    ) {
+        if current.is_empty() {
+            return;
+        }
+        stats.document_len += 1;
+
+        match class {
+            Some(TokenClass::Word) => {
+                for (index, term) in self.terms.as_slice().iter().enumerate() {
+                    if self.kinds[index] == QueryTermKind::Word && current == term {
+                        stats.frequencies[index] += 1;
+                    }
+                }
+            }
+            Some(TokenClass::Cjk) => {
+                let chars = current.chars().collect::<Vec<_>>();
+                for size in [2, 3, 4] {
+                    stats.document_len += chars.len().saturating_sub(size - 1);
+                }
+                for (index, term) in self.terms.as_slice().iter().enumerate() {
+                    let QueryTermKind::Cjk(query_chars) = &self.kinds[index] else {
+                        continue;
+                    };
+                    if current == term {
+                        stats.frequencies[index] += 1;
+                    }
+                    if (2..=4).contains(&query_chars.len()) {
+                        stats.frequencies[index] += chars
+                            .windows(query_chars.len())
+                            .filter(|window| *window == query_chars.as_slice())
+                            .count();
+                    }
+                }
+            }
+            None => {}
+        }
+        current.clear();
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScoringProfile {
     pub bm25_weight: usize,
@@ -107,55 +212,105 @@ impl CorpusScorer {
             document_frequencies,
         }
     }
-
-    fn idf(&self, term: &str) -> f64 {
-        let document_count = self.document_count.max(1) as f64;
-        let document_frequency = self
-            .document_frequencies
-            .get(term)
-            .copied()
-            .unwrap_or_default() as f64;
-
-        (1.0 + ((document_count - document_frequency + 0.5) / (document_frequency + 0.5))).ln()
-    }
-
-    fn bm25_score(
-        &self,
-        frequencies: &BTreeMap<String, usize>,
-        document_len: usize,
-        terms: &QueryTerms,
-    ) -> f64 {
-        const K1: f64 = 1.2;
-        const B: f64 = 0.75;
-
-        let document_len = document_len.max(1) as f64;
-        let length_normalizer = 1.0 - B + B * (document_len / self.average_document_len);
-
-        terms
-            .as_slice()
-            .iter()
-            .filter_map(|term| {
-                let term_frequency = frequencies.get(term).copied().unwrap_or_default() as f64;
-                if term_frequency == 0.0 {
-                    return None;
-                }
-
-                let numerator = term_frequency * (K1 + 1.0);
-                let denominator = term_frequency + K1 * length_normalizer;
-                Some(self.idf(term) * (numerator / denominator))
-            })
-            .sum()
-    }
 }
 
 impl ChunkScorer for CorpusScorer {
     fn score(&self, chunk: &Chunk, terms: &QueryTerms) -> Option<ScoreBreakdown> {
-        if terms.is_empty() {
+        let text_tokens = tokenize(&chunk.text);
+        let text_frequencies = term_frequencies(&text_tokens);
+        let stats = QueryDocumentStats {
+            frequencies: terms
+                .as_slice()
+                .iter()
+                .map(|term| text_frequencies.get(term).copied().unwrap_or_default())
+                .collect(),
+            document_len: text_tokens.len(),
+        };
+        let document_frequencies = terms
+            .as_slice()
+            .iter()
+            .map(|term| {
+                self.document_frequencies
+                    .get(term)
+                    .copied()
+                    .unwrap_or_default()
+            })
+            .collect::<Vec<_>>();
+        QueryScoreContext {
+            terms,
+            profile: self.profile,
+            document_count: self.document_count,
+            average_document_len: self.average_document_len,
+            document_frequencies: &document_frequencies,
+        }
+        .score(chunk, &stats)
+    }
+}
+
+struct QueryCorpusScorer {
+    profile: ScoringProfile,
+    document_count: usize,
+    average_document_len: f64,
+    document_frequencies: Vec<usize>,
+}
+
+impl QueryCorpusScorer {
+    fn from_stats(stats: &[QueryDocumentStats], profile: ScoringProfile) -> Self {
+        let document_count = stats.len();
+        let total_terms = stats.iter().map(|stats| stats.document_len).sum::<usize>();
+        let average_document_len = if document_count == 0 {
+            1.0
+        } else {
+            (total_terms as f64 / document_count as f64).max(1.0)
+        };
+        let term_count = stats.first().map_or(0, |stats| stats.frequencies.len());
+        let mut document_frequencies = vec![0; term_count];
+        for stats in stats {
+            for (index, frequency) in stats.frequencies.iter().enumerate() {
+                if *frequency > 0 {
+                    document_frequencies[index] += 1;
+                }
+            }
+        }
+        Self {
+            profile,
+            document_count,
+            average_document_len,
+            document_frequencies,
+        }
+    }
+
+    fn score(
+        &self,
+        chunk: &Chunk,
+        terms: &QueryTerms,
+        stats: &QueryDocumentStats,
+    ) -> Option<ScoreBreakdown> {
+        QueryScoreContext {
+            terms,
+            profile: self.profile,
+            document_count: self.document_count,
+            average_document_len: self.average_document_len,
+            document_frequencies: &self.document_frequencies,
+        }
+        .score(chunk, stats)
+    }
+}
+
+struct QueryScoreContext<'a> {
+    terms: &'a QueryTerms,
+    profile: ScoringProfile,
+    document_count: usize,
+    average_document_len: f64,
+    document_frequencies: &'a [usize],
+}
+
+impl QueryScoreContext<'_> {
+    fn score(&self, chunk: &Chunk, stats: &QueryDocumentStats) -> Option<ScoreBreakdown> {
+        if self.terms.is_empty() {
             return None;
         }
 
-        let text_tokens = tokenize(&chunk.text);
-        let text_frequencies = term_frequencies(&text_tokens);
         let path = normalize_search_text(&chunk.path.to_string_lossy());
         let title = chunk
             .title
@@ -168,33 +323,31 @@ impl ChunkScorer for CorpusScorer {
             .map(|name| normalize_search_text(&name.to_string_lossy()))
             .unwrap_or_default();
 
-        let text_matches = terms
-            .as_slice()
-            .iter()
-            .map(|term| text_frequencies.get(term).copied().unwrap_or_default())
-            .sum::<usize>();
-        let path_matches = count_matches(&path, terms.as_slice());
-        let title_matches = count_matches(&title, terms.as_slice());
-        let file_name_matches = count_matches(&file_name, terms.as_slice());
+        let text_matches = stats.frequencies.iter().sum::<usize>();
+        let path_matches = count_matches(&path, self.terms.as_slice());
+        let title_matches = count_matches(&title, self.terms.as_slice());
+        let file_name_matches = count_matches(&file_name, self.terms.as_slice());
         let total_matches = text_matches + path_matches + title_matches + file_name_matches;
 
         if total_matches == 0 {
             return None;
         }
 
-        let text_matched_terms = terms
-            .as_slice()
+        let text_matched_terms = stats
+            .frequencies
             .iter()
-            .filter(|term| text_frequencies.contains_key(term.as_str()))
+            .filter(|frequency| **frequency > 0)
             .count();
-        let bm25_score = self.bm25_score(&text_frequencies, text_tokens.len(), terms);
+        let bm25_score = self.bm25_score(stats);
         let lexical_score = (bm25_score * self.profile.bm25_weight as f64).round() as usize;
         let text_match_score = text_matched_terms * self.profile.text_match_weight;
-        let covered_terms = terms
+        let covered_terms = self
+            .terms
             .as_slice()
             .iter()
-            .filter(|term| {
-                text_frequencies.contains_key(term.as_str())
+            .enumerate()
+            .filter(|(index, term)| {
+                stats.frequencies[*index] > 0
                     || path.contains(term.as_str())
                     || title.contains(term.as_str())
                     || file_name.contains(term.as_str())
@@ -202,7 +355,7 @@ impl ChunkScorer for CorpusScorer {
             .count();
         let term_coverage_score = covered_terms * self.profile.term_coverage_weight;
         let full_coverage_score =
-            if terms.as_slice().len() > 1 && covered_terms == terms.as_slice().len() {
+            if self.terms.as_slice().len() > 1 && covered_terms == self.terms.as_slice().len() {
                 self.profile.full_coverage_weight
             } else {
                 0
@@ -212,7 +365,7 @@ impl ChunkScorer for CorpusScorer {
         let file_name_match_score = file_name_matches * self.profile.file_name_match_weight;
         let chunk_kind_score = chunk_kind_bonus(chunk.kind);
         let file_kind_score = file_kind_bonus(&chunk.path) + chunk_kind_score;
-        let density_score = density_bonus(text_matches, terms.as_slice().len(), self.profile);
+        let density_score = density_bonus(text_matches, self.terms.as_slice().len(), self.profile);
         let total_score = lexical_score
             + text_match_score
             + term_coverage_score
@@ -230,14 +383,14 @@ impl ChunkScorer for CorpusScorer {
         if text_matches > 0 {
             reasons.push(format!(
                 "exact text matches: {text_matches}, unique terms {text_matched_terms}/{} x {}",
-                terms.as_slice().len(),
+                self.terms.as_slice().len(),
                 self.profile.text_match_weight
             ));
         }
         if term_coverage_score > 0 {
             reasons.push(format!(
                 "term coverage: {covered_terms}/{} x {}",
-                terms.as_slice().len(),
+                self.terms.as_slice().len(),
                 self.profile.term_coverage_weight
             ));
         }
@@ -282,6 +435,34 @@ impl ChunkScorer for CorpusScorer {
             total_score,
             reasons,
         })
+    }
+
+    fn bm25_score(&self, stats: &QueryDocumentStats) -> f64 {
+        const K1: f64 = 1.2;
+        const B: f64 = 0.75;
+
+        let document_count = self.document_count.max(1) as f64;
+        let document_len = stats.document_len.max(1) as f64;
+        let length_normalizer = 1.0 - B + B * (document_len / self.average_document_len.max(1.0));
+
+        stats
+            .frequencies
+            .iter()
+            .zip(self.document_frequencies)
+            .filter_map(|(frequency, document_frequency)| {
+                if *frequency == 0 {
+                    return None;
+                }
+                let frequency = *frequency as f64;
+                let document_frequency = *document_frequency as f64;
+                let idf = (1.0
+                    + ((document_count - document_frequency + 0.5) / (document_frequency + 0.5)))
+                    .ln();
+                let numerator = frequency * (K1 + 1.0);
+                let denominator = frequency + K1 * length_normalizer;
+                Some(idf * (numerator / denominator))
+            })
+            .sum()
     }
 }
 
@@ -347,8 +528,23 @@ pub fn rank_chunks(
     terms: &QueryTerms,
 ) -> Vec<RankedChunk> {
     let chunks = chunks.into_iter().collect::<Vec<_>>();
-    let scorer = CorpusScorer::from_chunks(&chunks, ScoringProfile::default());
-    rank_chunks_with_scorer(chunks, terms, &scorer)
+    let matcher = QueryMatcher::new(terms);
+    let stats = chunks
+        .iter()
+        .map(|chunk| matcher.document_stats(&chunk.text))
+        .collect::<Vec<_>>();
+    let scorer = QueryCorpusScorer::from_stats(&stats, ScoringProfile::default());
+    let mut ranked = chunks
+        .into_iter()
+        .zip(stats)
+        .filter_map(|(chunk, stats)| {
+            scorer
+                .score(&chunk, terms, &stats)
+                .map(|score| ranked_chunk(chunk, score))
+        })
+        .collect::<Vec<_>>();
+    sort_ranked_chunks(&mut ranked);
+    ranked
 }
 
 pub fn rank_chunks_with_scorer<S>(
@@ -366,21 +562,30 @@ where
             continue;
         };
 
-        let preview = preview(&chunk.text);
-        ranked.push(RankedChunk {
-            path: chunk.path,
-            kind: chunk.kind,
-            title: chunk.title,
-            start_line: chunk.start_line,
-            end_line: chunk.end_line,
-            score: score_breakdown.total_score,
-            token_estimate: chunk.token_estimate,
-            text: chunk.text,
-            preview,
-            score_breakdown,
-        });
+        ranked.push(ranked_chunk(chunk, score_breakdown));
     }
 
+    sort_ranked_chunks(&mut ranked);
+    ranked
+}
+
+fn ranked_chunk(chunk: Chunk, score_breakdown: ScoreBreakdown) -> RankedChunk {
+    let preview = preview(&chunk.text);
+    RankedChunk {
+        path: chunk.path,
+        kind: chunk.kind,
+        title: chunk.title,
+        start_line: chunk.start_line,
+        end_line: chunk.end_line,
+        score: score_breakdown.total_score,
+        token_estimate: chunk.token_estimate,
+        text: chunk.text,
+        preview,
+        score_breakdown,
+    }
+}
+
+fn sort_ranked_chunks(ranked: &mut [RankedChunk]) {
     ranked.sort_by(|left, right| {
         right
             .score
@@ -388,8 +593,6 @@ where
             .then_with(|| left.path.cmp(&right.path))
             .then_with(|| left.start_line.cmp(&right.start_line))
     });
-
-    ranked
 }
 
 fn count_matches(text: &str, terms: &[String]) -> usize {
@@ -460,7 +663,7 @@ fn token_class(ch: char) -> Option<TokenClass> {
     (ch.is_alphanumeric() || ch == '_').then_some(TokenClass::Word)
 }
 
-fn normalize_search_text(text: &str) -> String {
+pub(crate) fn normalize_search_text(text: &str) -> String {
     let mut normalized = String::new();
     for ch in text.chars() {
         for lower in normalize_char(ch).to_lowercase() {
@@ -723,5 +926,46 @@ mod tests {
             .reasons
             .iter()
             .any(|reason| reason.contains("full query coverage")));
+    }
+
+    #[test]
+    fn query_document_stats_match_existing_mixed_language_tokenization() {
+        let terms = QueryTerms::parse("rust 齐泽克");
+
+        let stats = QueryMatcher::new(&terms).document_stats("Rust rust 齐泽克");
+
+        assert_eq!(stats.document_len, 6);
+        assert_eq!(stats.frequencies, vec![2, 2, 1, 1]);
+    }
+
+    #[test]
+    fn query_aware_ranking_matches_full_corpus_statistics() {
+        let terms = QueryTerms::parse("rust 齐泽克");
+        let chunks = vec![
+            Chunk {
+                path: PathBuf::from("docs/one.md"),
+                kind: ChunkKind::MarkdownSection,
+                title: Some("Rust and 齐泽克".to_string()),
+                start_line: 1,
+                end_line: 3,
+                text: "Rust rust 齐泽克".to_string(),
+                token_estimate: 6,
+            },
+            Chunk {
+                path: PathBuf::from("docs/two.txt"),
+                kind: ChunkKind::Paragraph,
+                title: None,
+                start_line: 4,
+                end_line: 5,
+                text: "齐泽克研究与 rust ownership".to_string(),
+                token_estimate: 8,
+            },
+        ];
+        let full_scorer = CorpusScorer::from_chunks(&chunks, ScoringProfile::default());
+        let expected = rank_chunks_with_scorer(chunks.clone(), &terms, &full_scorer);
+
+        let actual = rank_chunks(chunks, &terms);
+
+        assert_eq!(actual, expected);
     }
 }

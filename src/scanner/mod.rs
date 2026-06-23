@@ -6,6 +6,7 @@ use std::{
 };
 
 use crate::{ContextForgeError, Result};
+use serde::{Deserialize, Serialize};
 
 const GENERATED_OUTPUT_FILES: [&str; 3] = [
     "context-bundle.md",
@@ -13,7 +14,8 @@ const GENERATED_OUTPUT_FILES: [&str; 3] = [
     "context-report.md",
 ];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum FileKind {
     Markdown,
     Rust,
@@ -33,7 +35,7 @@ pub enum FileKind {
 }
 
 impl FileKind {
-    fn from_path(path: &Path) -> Self {
+    pub(crate) fn from_path(path: &Path) -> Self {
         if let Some(kind) = file_name_kind(path) {
             return kind;
         }

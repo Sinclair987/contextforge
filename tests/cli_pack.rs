@@ -230,12 +230,44 @@ fn pack_dry_run_previews_selection_without_writing_outputs() {
         .stdout(predicate::str::contains("Dry run: no files written"))
         .stdout(predicate::str::contains("Selected preview:"))
         .stdout(predicate::str::contains("Excluded preview:"))
-        .stdout(predicate::str::contains("score"))
-        .stdout(predicate::str::contains("per-file budget limit"));
+        .stdout(predicate::str::contains("ownership.md"))
+        .stdout(predicate::str::contains("reason:").not())
+        .stdout(predicate::str::contains("score").not())
+        .stdout(predicate::str::contains("tokens").not())
+        .stdout(predicate::str::contains("| paragraph |").not())
+        .stdout(predicate::str::contains("per-file budget limit").not());
 
     assert!(!root.join("context-bundle.md").exists());
     assert!(!root.join("context-manifest.json").exists());
     assert!(!root.join("context-report.md").exists());
+}
+
+#[test]
+fn pack_dry_run_explain_restores_opt_in_diagnostics() {
+    let temp = tempdir().expect("temporary directory");
+    fs::write(
+        temp.path().join("notes.md"),
+        "ownership borrowing ownership borrowing diagnostic context\n",
+    )
+    .expect("source file");
+
+    Command::cargo_bin("contextforge")
+        .expect("contextforge binary")
+        .current_dir(temp.path())
+        .args([
+            "pack",
+            "ownership borrowing",
+            "--budget",
+            "100",
+            "--dry-run",
+            "--explain",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("reason:"))
+        .stdout(predicate::str::contains("score"))
+        .stdout(predicate::str::contains("tokens"))
+        .stdout(predicate::str::contains("per-file budget limit"));
 }
 
 #[test]

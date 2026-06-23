@@ -55,6 +55,33 @@ pub enum ContextForgeError {
         source: toml::de::Error,
     },
 
+    #[error("failed to read knowledge index `{path}`")]
+    ReadIndex {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("failed to parse knowledge index `{path}`")]
+    ParseIndex {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
+
+    #[error("failed to serialize knowledge index")]
+    SerializeIndex {
+        #[source]
+        source: serde_json::Error,
+    },
+
+    #[error("failed to write knowledge index `{path}`")]
+    WriteIndex {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
     #[error("failed to write output file `{path}`")]
     WriteOutput {
         path: PathBuf,
