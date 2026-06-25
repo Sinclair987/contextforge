@@ -317,7 +317,8 @@ fn visit_directory(
             continue;
         }
 
-        if !kind.can_be_binary_document() && file_starts_with_binary_content(&path)? {
+        if !kind.can_be_binary_document() && file_starts_with_binary_content(&path, metadata.len())?
+        {
             summary.skipped.push(SkippedEntry {
                 path,
                 reason: SkipReason::Binary,
@@ -335,7 +336,7 @@ fn visit_directory(
     Ok(())
 }
 
-fn file_starts_with_binary_content(path: &Path) -> Result<bool> {
+fn file_starts_with_binary_content(path: &Path, file_size_bytes: u64) -> Result<bool> {
     const PROBE_BYTES: u64 = 8 * 1024;
 
     let file = fs::File::open(path).map_err(|source| ContextForgeError::ReadFile {
@@ -349,7 +350,8 @@ fn file_starts_with_binary_content(path: &Path) -> Result<bool> {
             path: path.to_path_buf(),
             source,
         })?;
-    Ok(is_binary(&content))
+    let probe_was_truncated = file_size_bytes > content.len() as u64;
+    Ok(is_binary(&content, probe_was_truncated))
 }
 
 fn should_visit_directory(relative: &Path, options: &ScanOptions) -> bool {
@@ -414,8 +416,15 @@ fn is_generated_output_file(path: &Path) -> bool {
         })
 }
 
-fn is_binary(content: &[u8]) -> bool {
-    content.contains(&0) || std::str::from_utf8(content).is_err()
+fn is_binary(content: &[u8], probe_was_truncated: bool) -> bool {
+    if content.contains(&0) {
+        return true;
+    }
+
+    match std::str::from_utf8(content) {
+        Ok(_) => false,
+        Err(error) => error.error_len().is_some() || !probe_was_truncated,
+    }
 }
 
 #[cfg(test)]
@@ -494,6 +503,19 @@ mod tests {
         );
         assert_eq!(summary.count_by_skip_reason(SkipReason::Binary), 1);
         assert_eq!(summary.count_by_skip_reason(SkipReason::TooLarge), 1);
+    }
+
+    #[test]
+    fn scan_directory_accepts_text_when_probe_ends_inside_utf8_character() {
+        let temp = tempdir().expect("temporary directory");
+        let root = temp.path();
+        let content = format!("{}中\n", "a".repeat(8 * 1024 - 1));
+        fs::write(root.join("notes.md"), content).expect("markdown file");
+
+        let summary = scan_directory(root, &ScanOptions::default()).expect("scan summary");
+
+        assert_eq!(summary.count_by_kind(FileKind::Markdown), 1);
+        assert_eq!(summary.count_by_skip_reason(SkipReason::Binary), 0);
     }
 
     #[test]
